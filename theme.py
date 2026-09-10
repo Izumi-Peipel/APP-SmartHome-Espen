@@ -1,0 +1,13 @@
+"""Warna & konstanta tampilan — disamakan dengan COLORS di App.js (RN)."""
+
+BG = "#0B0F14"
+SURFACE = "#141A21"
+SURFACE_ALT = "#1C242D"
+BORDER = "#232C36"
+TEXT = "#F2F5F7"
+TEXT_DIM = "#8B98A5"
+ACCENT = "#3AA6FF"
+DANGER = "#FF5C5C"
+SUCCESS = "#39D98A"
+LATE = "#F0B36A"
+KELUAR = "#C68FFF"

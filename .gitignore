@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Node
+node_modules/
+npm-debug.log
+
+# Database & data sensitif
+attendance.db
+attendance_backup_*.db
+
+# Penyimpanan lokal (token login, dll)
+local_storage.json
+
+# Environment variables / rahasia
+.env
+
+# Build output Flet
+build/
+dist/
+
+# Editor/OS
+.vscode/
+.DS_Store
