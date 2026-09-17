@@ -30,16 +30,20 @@ DATA_DIR = Path("face_data")
 PEOPLE_DIR = DATA_DIR / "people"
 MODEL_PATH = DATA_DIR / "model.yml"
 LABELS_PATH = DATA_DIR / "labels.json"
+CONFIG_PATH = DATA_DIR / "config.json"
+COOLDOWN_PATH = DATA_DIR / "cooldown.json"
 
 FACE_SIZE = (200, 200)  # semua crop wajah diseragamkan ke ukuran ini
 SAMPLES_PER_PERSON = 20
 MIN_SAMPLE_INTERVAL_S = 0.35  # jeda antar sampel otomatis saat enrollment
+BLUR_MIN_VARIANCE = 60.0  # sampel di bawah ini dianggap terlalu buram, dilewati
+LIVENESS_MIN_MOTION = 1.2  # skala 0-255; di bawah ini dicurigai foto statis/layar
 
 # LBPH predict() mengembalikan "distance" (BUKAN persentase kemiripan) --
 # semakin KECIL semakin mirip. 0 = identik, biasanya di atas ~90-100 sudah
-# dianggap orang berbeda. Nilai ini sering perlu disesuaikan per kondisi
-# kamera/pencahayaan kamu.
-MATCH_THRESHOLD = 75
+# dianggap orang berbeda. Nilai default ini dipakai kalau belum pernah
+# diubah lewat set_threshold() (tersimpan permanen di face_data/config.json).
+DEFAULT_MATCH_THRESHOLD = 75
 
 
 class FaceEngine:
@@ -51,7 +55,9 @@ class FaceEngine:
         self._cap: cv2.VideoCapture | None = None
         self._recognizer = None  # dibuat lazy, cuma kalau cv2.face tersedia
         self._labels: dict[int, str] = {}  # label numerik -> nama
+        self._threshold = DEFAULT_MATCH_THRESHOLD
         self._load_model_if_exists()
+        self._load_config()
 
     # ------------------------------------------------------------ kamera
     def open_camera(self, index: int = 0) -> bool:
@@ -96,6 +102,33 @@ class FaceEngine:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         crop = gray[y:y + h, x:x + w]
         return cv2.resize(crop, FACE_SIZE)
+
+    # ------------------------------------------------------------ kualitas sampel & liveness
+    def blur_variance(self, gray_crop: np.ndarray) -> float:
+        """Skor ketajaman gambar (varians Laplacian) -- makin TINGGI makin
+        tajam. Di bawah BLUR_MIN_VARIANCE dianggap terlalu buram."""
+        return float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+
+    def is_blurry(self, gray_crop: np.ndarray) -> bool:
+        return self.blur_variance(gray_crop) < BLUR_MIN_VARIANCE
+
+    def motion_score(self, crops: list[np.ndarray]) -> float:
+        """Heuristik liveness SEDERHANA: rata-rata perbedaan piksel antar
+        crop wajah berurutan dalam jendela waktu singkat. Wajah asli hampir
+        selalu punya sedikit gerakan mikro (kedip, napas, goyang kepala
+        halus); foto yang di-print/ditunjukkan lewat layar & dipegang diam
+        cenderung menghasilkan frame yang IDENTIK terus-menerus -> skor
+        mendekati 0. Ini BUKAN anti-spoofing yang kuat, cuma penyaring kasus
+        paling gampang (foto statis yang benar-benar tidak digerakkan)."""
+        if len(crops) < 2:
+            return 999.0  # belum cukup data -> jangan blokir, anggap OK
+        diffs = []
+        for a, b in zip(crops, crops[1:]):
+            diffs.append(float(cv2.absdiff(a, b).mean()))
+        return sum(diffs) / len(diffs)
+
+    def is_likely_static(self, crops: list[np.ndarray]) -> bool:
+        return self.motion_score(crops) < LIVENESS_MIN_MOTION
 
     # ------------------------------------------------------------ render buat Flet
     def frame_to_base64(self, frame, box=None, box_color=(91, 140, 255)) -> str:
@@ -194,15 +227,64 @@ class FaceEngine:
         return self._recognizer is not None and len(self._labels) > 0
 
     def predict(self, gray_crop: np.ndarray) -> tuple[str | None, float]:
-        """Return (nama, distance) kalau cocok di bawah MATCH_THRESHOLD,
+        """Return (nama, distance) kalau cocok di bawah threshold aktif,
         atau (None, distance) kalau tidak ada yang cukup mirip / model
         belum ada sama sekali."""
         if not self.has_model():
             return None, 999.0
         label, distance = self._recognizer.predict(gray_crop)
-        if distance <= MATCH_THRESHOLD and label in self._labels:
+        if distance <= self._threshold and label in self._labels:
             return self._labels[label], float(distance)
         return None, float(distance)
+
+    # ------------------------------------------------------------ konfigurasi (threshold, dsb)
+    def get_threshold(self) -> float:
+        return self._threshold
+
+    def set_threshold(self, value: float):
+        self._threshold = float(value)
+        self._save_config()
+
+    def _load_config(self):
+        if CONFIG_PATH.exists():
+            try:
+                cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                self._threshold = float(cfg.get("match_threshold", DEFAULT_MATCH_THRESHOLD))
+            except Exception as ex:
+                print("Gagal load config wajah, pakai default:", ex)
+
+    def reload_config(self):
+        """Panggil ini kalau curiga config.json berubah dari instance
+        FaceEngine lain (mis. diubah lewat dialog Pengaturan) supaya
+        threshold yang dipakai selalu yang paling baru."""
+        self._load_config()
+
+    def _save_config(self):
+        try:
+            CONFIG_PATH.write_text(json.dumps({"match_threshold": self._threshold}), encoding="utf-8")
+        except Exception as ex:
+            print("Gagal menyimpan config wajah:", ex)
+
+    # ------------------------------------------------------------ cooldown persisten (anti double-absen)
+    def _load_cooldown(self) -> dict:
+        if COOLDOWN_PATH.exists():
+            try:
+                return json.loads(COOLDOWN_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    def get_last_recognized_at(self, name: str) -> float | None:
+        data = self._load_cooldown()
+        return data.get(name)
+
+    def mark_recognized_now(self, name: str, timestamp: float):
+        data = self._load_cooldown()
+        data[name] = timestamp
+        try:
+            COOLDOWN_PATH.write_text(json.dumps(data), encoding="utf-8")
+        except Exception as ex:
+            print("Gagal menyimpan cooldown wajah:", ex)
 
 
 def _safe_folder(name: str) -> str:

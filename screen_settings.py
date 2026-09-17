@@ -288,6 +288,22 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
 
         list_col = ft.Column(spacing=8)
 
+        threshold_text = ft.Text(f"Sensitivitas: {int(engine.get_threshold())}", color=C.TEXT, size=13, weight=ft.FontWeight.W_600)
+        threshold_slider = ft.Slider(
+            min=40, max=110, divisions=14, value=engine.get_threshold(),
+            active_color=C.WAJAH, inactive_color=C.BORDER,
+        )
+
+        def on_threshold_change(ev):
+            threshold_text.value = f"Sensitivitas: {int(threshold_slider.value)}"
+            engine.set_threshold(threshold_slider.value)
+            try:
+                threshold_text.update()
+            except Exception:
+                pass
+
+        threshold_slider.on_change = on_threshold_change
+
         def refresh():
             list_col.controls.clear()
             if not people:
@@ -326,6 +342,14 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                             "Data wajah asli (kamera laptop, disimpan lokal di folder face_data/). "
                             "Untuk menambah wajah baru, gunakan tab Scan > Wajah.",
                             color=C.TEXT_DIM, size=12,
+                        ),
+                        ft.Divider(color=C.BORDER),
+                        threshold_text,
+                        threshold_slider,
+                        ft.Text(
+                            "Geser ke kiri = lebih ketat (gampang menolak, jarang salah kenal). "
+                            "Geser ke kanan = lebih longgar (gampang cocok, tapi risiko salah kenal naik).",
+                            color=C.TEXT_FAINT, size=11,
                         ),
                         ft.Divider(color=C.BORDER),
                         list_col,

@@ -9,6 +9,7 @@ lewat start()/stop()), supaya tidak mengunci webcam terus-menerus."""
 
 import asyncio
 import time
+from collections import deque
 import flet as ft
 import theme as C
 import api
@@ -16,6 +17,7 @@ from face_engine import FaceEngine, SAMPLES_PER_PERSON
 
 RECOGNIZE_COOLDOWN_S = 30  # jeda sebelum orang yang sama bisa absen lagi via wajah
 LOOP_INTERVAL_S = 0.12  # ~8 fps, cukup ringan buat laptop rata-rata
+MOTION_WINDOW = 6  # jumlah crop kecil yang disimpan buat cek liveness (~0.7 detik)
 
 
 class FaceTab:
@@ -30,8 +32,8 @@ class FaceTab:
         self._enroll_name: str | None = None
         self._enroll_target = SAMPLES_PER_PERSON
         self._enroll_progress_cb = None
-        self._last_recognized: tuple[str, float] | None = None
         self._recognizing = False
+        self._motion_crops = deque(maxlen=MOTION_WINDOW)  # buat cek liveness sederhana
 
         # ---- UI ----
         self.preview_img = ft.Container(
@@ -103,6 +105,7 @@ class FaceTab:
     async def start(self):
         if self._active:
             return
+        self.engine.reload_config()  # kalau threshold sempat diubah lewat Pengaturan
         ok = await asyncio.to_thread(self.engine.open_camera)
         if not ok:
             self.status_text.value = "Gagal membuka kamera laptop (dipakai app lain? / izin kamera ditolak?)"
@@ -115,6 +118,7 @@ class FaceTab:
     def stop(self):
         self._active = False
         self._enroll_name = None
+        self._motion_crops.clear()
         self.engine.close_camera()
 
     def _safe_update(self, control):
@@ -142,19 +146,34 @@ class FaceTab:
             )
             self._safe_update(self.preview_img)
 
-            # auto-capture sampel kalau lagi mode enrollment
-            if self._enroll_name and box is not None:
-                now = time.time()
-                if now - self._last_sample_time >= 0.35:
-                    gray = await asyncio.to_thread(self.engine.crop_face_gray, frame, box)
-                    count = await asyncio.to_thread(self.engine.add_sample, self._enroll_name, gray)
-                    self._last_sample_time = now
-                    if self._enroll_progress_cb:
-                        self._enroll_progress_cb(count)
-                    if count >= self._enroll_target:
-                        self._enroll_name = None  # target tercapai, UI dialog yang lanjut training
+            if box is not None:
+                # simpan crop kecil buat cek liveness (gerakan mikro) nanti
+                small = await asyncio.to_thread(self._small_crop, frame, box)
+                self._motion_crops.append(small)
+
+                # auto-capture sampel kalau lagi mode enrollment -- lewati
+                # kalau buram, supaya data training tidak rusak
+                if self._enroll_name:
+                    now = time.time()
+                    if now - self._last_sample_time >= 0.35:
+                        gray = await asyncio.to_thread(self.engine.crop_face_gray, frame, box)
+                        if not await asyncio.to_thread(self.engine.is_blurry, gray):
+                            count = await asyncio.to_thread(self.engine.add_sample, self._enroll_name, gray)
+                            self._last_sample_time = now
+                            if self._enroll_progress_cb:
+                                self._enroll_progress_cb(count)
+                            if count >= self._enroll_target:
+                                self._enroll_name = None  # target tercapai, UI dialog yang lanjut training
+                        else:
+                            self._last_sample_time = now - 0.2  # coba lagi sedikit lebih cepat
 
             await asyncio.sleep(LOOP_INTERVAL_S)
+
+    def _small_crop(self, frame, box):
+        import cv2
+        x, y, w, h = box
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray[y:y + h, x:x + w], (50, 50))
 
     # ------------------------------------------------------------ deteksi & absen
     async def _do_recognize(self):
@@ -171,6 +190,18 @@ class FaceTab:
             self._safe_update(self.status_text)
             return
 
+        # Liveness sederhana: tolak kalau beberapa frame terakhir nyaris
+        # identik (indikasi foto/layar HP yang dipegang diam). Bukan
+        # anti-spoofing yang kuat, tapi menyaring kasus paling gampang.
+        if await asyncio.to_thread(self.engine.is_likely_static, list(self._motion_crops)):
+            self.status_text.value = (
+                "Terdeteksi seperti gambar statis (foto/layar). Gerakkan wajah "
+                "sedikit (kedip/geleng pelan) lalu coba lagi."
+            )
+            self.status_text.color = C.LATE
+            self._safe_update(self.status_text)
+            return
+
         self._recognizing = True
         self.scan_btn_text.value = "Mencocokkan..."
         self._safe_update(self.scan_btn)
@@ -181,15 +212,15 @@ class FaceTab:
 
         if name:
             now = time.time()
-            last = self._last_recognized
-            if last and last[0] == name and (now - last[1]) < RECOGNIZE_COOLDOWN_S:
-                sisa = int(RECOGNIZE_COOLDOWN_S - (now - last[1]))
+            last_ts = await asyncio.to_thread(self.engine.get_last_recognized_at, name)
+            if last_ts and (now - last_ts) < RECOGNIZE_COOLDOWN_S:
+                sisa = int(RECOGNIZE_COOLDOWN_S - (now - last_ts))
                 self.status_text.value = f"{name} sudah tercatat barusan. Coba lagi {sisa} detik lagi."
                 self.status_text.color = C.TEXT_DIM
             else:
                 try:
                     await api.post_manual_attendance(name)
-                    self._last_recognized = (name, now)
+                    await asyncio.to_thread(self.engine.mark_recognized_now, name, now)
                     self.status_text.value = f"✓ Absen tercatat untuk {name} (jarak {distance:.0f})"
                     self.status_text.color = C.SUCCESS
                 except Exception as ex:
