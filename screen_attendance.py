@@ -386,31 +386,134 @@ class AttendanceView:
         self.page.show_dialog(dialog)
 
     def _open_date_picker(self, e):
-        unique_dates = sorted({i["scanned_at"][:10] for i in self.attendance}, reverse=True)
-        items = []
-        for d in unique_dates:
-            def pick(e, d=d):
-                self.custom_date = d
-                self.date_filter = "custom"
-                self._build_filter_chips()
-                self._render()
-                self.page.pop_dialog()
-                self.filter_chips_row.update()
-                self.list_area.update()
+        import calendar as _cal
+        from datetime import date as _date
 
-            items.append(
-                ft.Container(
-                    content=ft.Text(format_date_time(f"{d}T00:00:00")[1], color=C.TEXT),
-                    padding=ft.Padding.symmetric(vertical=10), on_click=pick,
-                )
+        unique_dates = {i["scanned_at"][:10] for i in self.attendance}
+
+        # state bulan yang ditampilkan -- default ke bulan tanggal terpilih,
+        # atau bulan berjalan kalau belum ada tanggal terpilih
+        if self.custom_date:
+            init_y, init_m = int(self.custom_date[:4]), int(self.custom_date[5:7])
+        else:
+            today = _date.today()
+            init_y, init_m = today.year, today.month
+        state = {"year": init_y, "month": init_m}
+
+        _BULAN_FULL = [
+            "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+            "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+        ]
+        _HARI_SINGKAT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+
+        header_text = ft.Text(weight=ft.FontWeight.BOLD, color=C.TEXT, size=15)
+        grid_col = ft.Column(spacing=6)
+
+        def build():
+            y, m = state["year"], state["month"]
+            header_text.value = f"{_BULAN_FULL[m - 1]} {y}"
+
+            weekday_row = ft.Row(
+                [ft.Container(ft.Text(h, size=11, color=C.TEXT_DIM, weight=ft.FontWeight.W_600,
+                                       text_align=ft.TextAlign.CENTER), width=38, alignment=ft.Alignment.CENTER)
+                 for h in _HARI_SINGKAT],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             )
-        content = ft.Column(items, scroll=ft.ScrollMode.AUTO) if items else ft.Text(
-            "Belum ada data absensi", color=C.TEXT_DIM
+
+            today_str = _date.today().isoformat()
+            weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, m)  # 0 = Senin
+            week_rows = [weekday_row, ft.Divider(color=C.BORDER, height=1)]
+            for week in weeks:
+                cells = []
+                for day in week:
+                    if day == 0:
+                        cells.append(ft.Container(width=38, height=38))
+                        continue
+                    d_str = f"{y:04d}-{m:02d}-{day:02d}"
+                    is_selected = self.date_filter == "custom" and self.custom_date == d_str
+                    is_today = d_str == today_str
+                    has_data = d_str in unique_dates
+
+                    if is_selected:
+                        bg, border_c, txt_c = C.ACCENT, C.ACCENT, C.BG
+                    elif is_today:
+                        bg, border_c, txt_c = C.SURFACE_ALT, C.ACCENT, C.TEXT
+                    else:
+                        bg, border_c, txt_c = C.SURFACE_ALT, C.BORDER, C.TEXT
+
+                    def pick(e, d=d_str):
+                        self.custom_date = d
+                        self.date_filter = "custom"
+                        self._build_filter_chips()
+                        self._render()
+                        self.page.pop_dialog()
+                        self.filter_chips_row.update()
+                        self.list_area.update()
+
+                    cells.append(
+                        ft.Container(
+                            width=38, height=38, bgcolor=bg, border=ft.Border.all(1, border_c),
+                            border_radius=ft.BorderRadius.all(10), alignment=ft.Alignment.CENTER,
+                            on_click=pick,
+                            content=ft.Stack(
+                                [
+                                    ft.Container(
+                                        content=ft.Text(str(day), size=13, color=txt_c, weight=ft.FontWeight.W_600),
+                                        alignment=ft.Alignment.CENTER, expand=True,
+                                    ),
+                                ] + ([
+                                    ft.Container(
+                                        width=4, height=4, border_radius=ft.BorderRadius.all(2),
+                                        bgcolor=C.BG if is_selected else C.SUCCESS,
+                                        bottom=4, left=17,
+                                    )
+                                ] if has_data and not is_today else []),
+                            ),
+                        )
+                    )
+                week_rows.append(ft.Row(cells, alignment=ft.MainAxisAlignment.SPACE_BETWEEN))
+            grid_col.controls = week_rows
+
+        def change_month(delta: int):
+            m = state["month"] + delta
+            y = state["year"]
+            if m > 12:
+                m, y = 1, y + 1
+            elif m < 1:
+                m, y = 12, y - 1
+            state["month"], state["year"] = m, y
+            build()
+            grid_col.update()
+            header_text.update()
+
+        def go_today(e):
+            today = _date.today()
+            state["year"], state["month"] = today.year, today.month
+            build()
+            grid_col.update()
+            header_text.update()
+
+        build()
+
+        nav_row = ft.Row(
+            [
+                ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, icon_color=C.TEXT, on_click=lambda e: change_month(-1)),
+                header_text,
+                ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, icon_color=C.TEXT, on_click=lambda e: change_month(1)),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
+
         dialog = ft.AlertDialog(
             title=ft.Text("Pilih Tanggal", color=C.TEXT), bgcolor=C.SURFACE,
-            content=ft.Container(content=content, width=320, height=320),
-            actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog())],
+            content=ft.Container(
+                content=ft.Column([nav_row, ft.Container(height=6), grid_col], tight=True),
+                width=320,
+            ),
+            actions=[
+                ft.TextButton(content=ft.Text("Hari Ini", color=C.ACCENT), on_click=go_today),
+                ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog()),
+            ],
         )
         self.page.show_dialog(dialog)
 

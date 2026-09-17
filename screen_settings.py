@@ -6,20 +6,21 @@ tidak perlu build ulang APK tiap kali domain ngrok berubah)."""
 import flet as ft
 import theme as C
 import api
+from face_engine import FaceEngine
 
 ROWS = [
-    ("videocam_outline", "Kelola Kamera"),
     ("notifications_outline", "Pengaturan Notifikasi"),
-    ("shield", "Sensitivitas Deteksi Gerakan"),
+    ("face_outline", "Kelola Data Wajah"),
+    ("finger_outline", "Kelola Data Sidik Jari"),
     ("cloud_outline", "Penyimpanan & Backup"),
     ("person_outline", "Akun"),
     ("logout", "Keluar"),
 ]
 
 _ICON_MAP = {
-    "videocam_outline": ft.Icons.VIDEOCAM_OUTLINED,
     "notifications_outline": ft.Icons.NOTIFICATIONS_OUTLINED,
-    "shield": ft.Icons.SHIELD_OUTLINED,
+    "face_outline": ft.Icons.FACE_RETOUCHING_NATURAL_OUTLINED,
+    "finger_outline": ft.Icons.FINGERPRINT_OUTLINED,
     "cloud_outline": ft.Icons.CLOUD_OUTLINED,
     "person_outline": ft.Icons.PERSON_OUTLINE,
     "logout": ft.Icons.LOGOUT_OUTLINED,
@@ -241,10 +242,10 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                     notif_row(ft.Icons.CREDIT_CARD_OFF_OUTLINED, "Kartu RFID tidak dikenal", switch_rfid),
                     notif_row(ft.Icons.SCHEDULE_OUTLINED, "Absen terlambat", switch_late),
                     notif_row(
-                        ft.Icons.CLOUD_OFF_OUTLINED,
-                        "Kamera offline",
+                        ft.Icons.SENSORS_OFF_OUTLINED,
+                        "Perangkat scan offline",
                         switch_camera,
-                        note="Aktif setelah kamera CCTV terpasang",
+                        note="Aktif setelah reader/sensor tambahan (wajah, sidik jari) terpasang",
                     ),
                     status_text,
                 ],
@@ -278,11 +279,89 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
         )
         page.show_dialog(dialog)
 
+    def open_face_management_dialog(e):
+        """Menampilkan data wajah ASLI (dari face_data/ lokal) -- beda dengan
+        sidik jari yang masih placeholder, ini sudah pakai data sungguhan
+        hasil enrollment di tab Scan > Wajah."""
+        engine = FaceEngine()
+        people = engine.list_people()
+
+        list_col = ft.Column(spacing=8)
+
+        def refresh():
+            list_col.controls.clear()
+            if not people:
+                list_col.controls.append(ft.Text("Belum ada wajah terdaftar.", color=C.TEXT_DIM, size=13))
+            for p in people:
+                def do_delete(ev, n=p["name"]):
+                    engine.delete_person(n)
+                    people[:] = engine.list_people()
+                    refresh()
+                    list_col.update()
+
+                list_col.controls.append(
+                    ft.Container(
+                        bgcolor=C.SURFACE_ALT, border=ft.Border.all(1, C.BORDER), border_radius=ft.BorderRadius.all(10),
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                        content=ft.Row(
+                            [
+                                ft.Text(p["name"], color=C.TEXT, size=14, expand=True),
+                                ft.Text(f"{p['samples']} sampel", color=C.TEXT_DIM, size=11),
+                                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, icon_color=C.DANGER, icon_size=18, on_click=do_delete),
+                            ],
+                            spacing=8,
+                        ),
+                    )
+                )
+
+        refresh()
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("Kelola Data Wajah", color=C.TEXT),
+            bgcolor=C.SURFACE,
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Data wajah asli (kamera laptop, disimpan lokal di folder face_data/). "
+                            "Untuk menambah wajah baru, gunakan tab Scan > Wajah.",
+                            color=C.TEXT_DIM, size=12,
+                        ),
+                        ft.Divider(color=C.BORDER),
+                        list_col,
+                    ],
+                    tight=True, spacing=10,
+                ),
+                width=320,
+            ),
+            actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog())],
+        )
+        page.show_dialog(dialog)
+
+    def open_placeholder_dialog(title: str, message: str):
+        def opener(e):
+            dialog = ft.AlertDialog(
+                title=ft.Text(title, color=C.TEXT),
+                bgcolor=C.SURFACE,
+                content=ft.Text(message, color=C.TEXT_DIM),
+                actions=[ft.TextButton(content=ft.Text("Mengerti", color=C.ACCENT), on_click=lambda e: page.pop_dialog())],
+            )
+            page.show_dialog(dialog)
+        return opener
+
     def handle_press(label: str):
         if label == "Penyimpanan & Backup":
             return open_backup_dialog
         if label == "Pengaturan Notifikasi":
             return lambda e: page.run_task(open_notifications_dialog, e)
+        if label == "Kelola Data Wajah":
+            return open_face_management_dialog
+        if label == "Kelola Data Sidik Jari":
+            return open_placeholder_dialog(
+                "Kelola Data Sidik Jari",
+                "Fitur ini masih mode simulasi (lihat tab Scan > Sidik Jari). "
+                "Pengelolaan data sidik jari asli akan aktif setelah sensor fisik terpasang.",
+            )
         if label == "Akun":
             return open_account_dialog
         if label == "Keluar":

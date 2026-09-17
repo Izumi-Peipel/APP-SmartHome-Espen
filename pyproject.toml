@@ -1,0 +1,9 @@
+[project]
+name = "flet_app"
+version = "1.0.0"
+description = "Absensi Digital - RFID + Wajah + Sidik Jari (Flet)"
+
+[tool.flet]
+org = "com.espen"
+product = "Absensi Digital"
+icon = "assets/icon.png"

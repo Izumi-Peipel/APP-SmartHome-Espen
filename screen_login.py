@@ -69,8 +69,13 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
         padding=ft.Padding.all(24),
         content=ft.Column(
             [
-                ft.Icon(ft.Icons.VIDEOCAM, size=48, color=C.ACCENT),
-                ft.Text("CCTV App Espen", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.FINGERPRINT_ROUNDED, size=32, color=C.ACCENT),
+                    width=64, height=64, border_radius=ft.BorderRadius.all(20),
+                    bgcolor=C.ACCENT_SOFT, alignment=ft.Alignment.CENTER,
+                ),
+                ft.Container(height=6),
+                ft.Text("Absensi Digital", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
                 ft.Text("Masuk untuk melanjutkan", color=C.TEXT_DIM, size=13),
                 ft.Container(height=20),
                 username_field,

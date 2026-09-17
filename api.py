@@ -144,7 +144,14 @@ async def force_logout() -> None:
 
 
 def _headers() -> dict:
-    return {"Authorization": f"Bearer {_token}"} if _token else {}
+    # ngrok-skip-browser-warning: WAJIB untuk domain *.ngrok-free.dev/.app --
+    # tanpa ini, ngrok akan membalas halaman HTML "You are about to visit..."
+    # (bukan JSON dari server.js) untuk semua request non-browser, yang bikin
+    # r.json() gagal dengan "Expecting value: line 1 column 1 (char 0)".
+    h = {"ngrok-skip-browser-warning": "true"}
+    if _token:
+        h["Authorization"] = f"Bearer {_token}"
+    return h
 
 
 async def _handle_401() -> None:
@@ -220,8 +227,16 @@ async def login(username: str, password: str) -> str:
     yang berhasil login. Melempar RuntimeError dengan pesan dari server
     kalau username/password salah."""
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        r = await client.post(login_url(), json={"username": username, "password": password})
-        data = r.json()
+        r = await client.post(
+            login_url(), json={"username": username, "password": password}, headers=_headers()
+        )
+        try:
+            data = r.json()
+        except Exception:
+            raise RuntimeError(
+                "Server tidak membalas JSON (kemungkinan URL backend salah/mati, "
+                "atau tunnel ngrok tidak aktif). Cek URL di Pengaturan."
+            )
         if r.status_code >= 400:
             raise RuntimeError(data.get("error", "Login gagal"))
     await _save_session(data["token"], data["username"])

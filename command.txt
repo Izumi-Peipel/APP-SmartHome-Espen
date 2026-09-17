@@ -1,0 +1,5 @@
+set MQTT_BROKER_URL=mqtts://t31c6676.ala.asia-southeast1.emqxsl.com:8883
+set MQTT_USERNAME=Espen
+set MQTT_PASSWORD=penpen112009
+ngrok http --domain=democracy-limpness-that.ngrok-free.dev 3000
+flet run main.py

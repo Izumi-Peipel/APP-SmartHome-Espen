@@ -9,6 +9,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto'); // built-in Node -> tidak perlu npm install tambahan
+const mqtt = require('mqtt');
 
 const app = express();
 const PORT = 3000; // ganti kalau port ini bentrok dengan aplikasi lain
@@ -20,19 +21,6 @@ const JAM_MASUK_BATAS = '08:00';
 // ---------- Middleware ----------
 app.use(cors()); // supaya app React Native boleh akses dari device lain
 app.use(express.json()); // supaya bisa baca body JSON dari POST
-
-// ---------- Rate Limiter (khusus endpoint RFID scan) ----------
-const scanLimiter = rateLimit({
-  windowMs: 10 * 1000, // 10 detik
-  max: 5,              // maksimal 5 scan per windowMs
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Terlalu banyak percobaan scan, coba lagi sebentar.' },
-  handler: (req, res, next, options) => {
-    console.warn(`⚠️  Rate limit terkena untuk IP ${req.ip} di /rfid/scan`);
-    res.status(429).json(options.message);
-  },
-});
 
 // ---------- Rate Limiter (khusus login, cegah brute-force password) ----------
 const loginLimiter = rateLimit({
@@ -459,30 +447,121 @@ app.delete('/attendance/:id', requireAuth, (req, res) => {
 //  ROUTES - RFID (kartu -> nama)
 // ============================================================
 
-app.post('/rfid/scan', scanLimiter, (req, res) => {
-  try {
-    const { uid } = req.body;
-    if (!uid || typeof uid !== 'string' || !uid.trim()) {
-      return res.status(400).json({ error: 'Field "uid" wajib diisi' });
-    }
-    const cleanUid = uid.trim().toUpperCase();
+// ---------- MQTT: scan RFID (menggantikan HTTP POST /rfid/scan) ----------
+// Skema topic:
+//   attendance/<reader_id>/scan    -> reader publish { "uid": "..." } tiap kartu ditap
+//   attendance/<reader_id>/result  -> server publish balik hasilnya (buat LED/buzzer di reader)
+//
+// <reader_id> bebas (mis. "pintu_depan", "pintu_belakang") -- satu server
+// bisa terima scan dari banyak reader sekaligus lewat wildcard subscribe.
+//
+// Broker & kredensial dari env var:
+//   MQTT_BROKER_URL  (wajib, mis. mqtts://xxxx.emqxsl.com:8883)
+//   MQTT_USERNAME, MQTT_PASSWORD (opsional, tergantung broker)
 
-    const card = db.prepare('SELECT * FROM cards WHERE uid = ?').get(cleanUid);
+const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL;
+const MQTT_USERNAME = process.env.MQTT_USERNAME;
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 
-    if (!card) {
-      lastUnknownScan = { uid: cleanUid, scanned_at: nowISOJakarta() };
-      console.log('Kartu belum terdaftar:', cleanUid);
-      return res.status(404).json({ error: 'Kartu belum terdaftar', uid: cleanUid });
-    }
+let mqttClient = null;
 
-    const record = recordAttendance(card.name);
-    console.log('Absen baru (RFID):', record);
-    res.status(200).json(record);
-  } catch (err) {
-    console.error('POST /rfid/scan error:', err);
-    res.status(500).json({ error: 'Gagal memproses scan RFID' });
+// Rate limit manual per reader_id -- gantinya express-rate-limit yang lama
+// (yang cuma jalan di request HTTP), nilainya disamakan: maks 5x / 10 detik.
+const SCAN_WINDOW_MS = 10 * 1000;
+const SCAN_MAX_PER_WINDOW = 5;
+const scanRateState = new Map(); // reader_id -> { count, windowStart }
+
+function isScanRateLimited(readerId) {
+  const now = Date.now();
+  const state = scanRateState.get(readerId);
+  if (!state || now - state.windowStart > SCAN_WINDOW_MS) {
+    scanRateState.set(readerId, { count: 1, windowStart: now });
+    return false;
   }
-});
+  state.count += 1;
+  return state.count > SCAN_MAX_PER_WINDOW;
+}
+
+function parseScanTopic(topic) {
+  // attendance/<reader_id>/scan
+  const parts = topic.split('/');
+  if (parts.length !== 3 || parts[0] !== 'attendance' || parts[2] !== 'scan') return null;
+  return { readerId: parts[1] };
+}
+
+function publishScanResult(readerId, result) {
+  if (!mqttClient || !mqttClient.connected) return;
+  mqttClient.publish(`attendance/${readerId}/result`, JSON.stringify(result), { qos: 1 });
+}
+
+function handleScanMessage(readerId, payload) {
+  const uid = typeof payload.uid === 'string' ? payload.uid.trim().toUpperCase() : null;
+  if (!uid) {
+    console.warn(`⚠️  Payload scan dari "${readerId}" tidak punya "uid" valid:`, payload);
+    return;
+  }
+
+  if (isScanRateLimited(readerId)) {
+    console.warn(`⚠️  Rate limit terkena untuk reader "${readerId}" (MQTT)`);
+    publishScanResult(readerId, { ok: false, error: 'Terlalu banyak percobaan scan, coba lagi sebentar.' });
+    return;
+  }
+
+  const card = db.prepare('SELECT * FROM cards WHERE uid = ?').get(uid);
+
+  if (!card) {
+    lastUnknownScan = { uid, scanned_at: nowISOJakarta() };
+    console.log(`Kartu belum terdaftar (via "${readerId}"):`, uid);
+    publishScanResult(readerId, { ok: false, error: 'Kartu belum terdaftar', uid });
+    return;
+  }
+
+  const record = recordAttendance(card.name);
+  console.log(`Absen baru (RFID via "${readerId}"):`, record);
+  publishScanResult(readerId, { ok: true, ...record });
+}
+
+if (MQTT_BROKER_URL) {
+  mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+    username: MQTT_USERNAME,
+    password: MQTT_PASSWORD,
+    clientId: `attendance_server_${Math.random().toString(16).slice(2, 10)}`,
+    clean: true,
+    reconnectPeriod: 3000,
+  });
+
+  mqttClient.on('connect', () => {
+    console.log('✅ MQTT terhubung:', MQTT_BROKER_URL);
+    mqttClient.subscribe('attendance/+/scan', (err) => {
+      if (err) console.error('Gagal subscribe attendance/+/scan:', err.message);
+      else console.log('📡 Subscribed: attendance/+/scan');
+    });
+  });
+
+  mqttClient.on('reconnect', () => console.log('🔄 MQTT reconnecting...'));
+  mqttClient.on('error', (err) => console.error('❌ MQTT error:', err.message));
+
+  mqttClient.on('message', (topic, rawPayload) => {
+    const parsed = parseScanTopic(topic);
+    if (!parsed) return;
+
+    let payload;
+    try {
+      payload = JSON.parse(rawPayload.toString());
+    } catch (e) {
+      console.warn('⚠️  Payload MQTT bukan JSON valid, di-skip:', topic, rawPayload.toString());
+      return;
+    }
+
+    handleScanMessage(parsed.readerId, payload);
+  });
+} else {
+  console.warn('============================================================');
+  console.warn('⚠️  MQTT_BROKER_URL belum diset -- scan RFID lewat MQTT TIDAK AKTIF.');
+  console.warn('   Set env var MQTT_BROKER_URL (mis. mqtts://xxxx.emqxsl.com:8883)');
+  console.warn('   beserta MQTT_USERNAME / MQTT_PASSWORD kalau brokernya butuh auth.');
+  console.warn('============================================================');
+}
 
 app.get('/rfid/last-unknown', requireAuth, (req, res) => {
   res.json(lastUnknownScan || null);
@@ -682,7 +761,7 @@ app.put('/settings/notifications', requireAuth, (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Server absensi aktif. Endpoint: /auth/login, /auth/logout, /auth/me, /auth/change-password, GET/POST /attendance, /attendance/summary, /attendance/export, /rfid/scan, /rfid/cards, /settings/notifications, /backup/database');
+  res.send('Server absensi aktif. Endpoint HTTP: /auth/login, /auth/logout, /auth/me, /auth/change-password, GET/POST /attendance, /attendance/summary, /attendance/export, /rfid/cards, /settings/notifications, /backup/database. Scan RFID sekarang lewat MQTT topic attendance/<reader_id>/scan (lihat MQTT_BROKER_URL).');
 });
 
 // GET /backup/database -> download file attendance.db mentah (backup penuh)

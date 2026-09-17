@@ -1,18 +1,19 @@
-# CCTV App Espen — versi Flet (Python)
+# Absensi Digital — versi Flet (Python)
 
-Port dari `cctv-app5` (Expo/React Native) ke [Flet](https://flet.dev), dijalankan
-dengan Python murni, tetap bisa jadi app Android/iOS beneran.
+Aplikasi absensi dengan 3 metode scan: **RFID** (aktif & berfungsi penuh lewat
+backend Express + MQTT), **Wajah**, dan **Sidik Jari** (dua yang terakhir
+masih **mode simulasi/mockup** — UI sudah jadi, tinggal disambungkan ke
+model face-recognition & sensor fisik nanti).
 
-## Fitur (sama seperti versi RN)
+## Tab Navigasi
 
-- **Live** — daftar kamera + placeholder video (masih mock, belum konek ESP32-CAM)
-- **Riwayat** — daftar rekaman (masih mock)
-- **Absensi** — fetch ke backend tiap 15 detik, statistik hadir/telat/minggu ini,
-  pencarian nama, filter tanggal (hari ini/minggu ini/semua/tanggal spesifik),
-  absen manual, detail riwayat per orang
-- **Kartu RFID** — polling kartu baru yang belum terdaftar tiap 3 detik,
-  daftarkan kartu, hapus kartu
-- **Pengaturan** — backup database (.db) & export laporan (.csv), buka lewat browser/URL launcher
+- **Beranda** — dashboard ringkasan absensi hari ini + pintasan ke 3 metode scan
+- **Absensi** — riwayat lengkap, statistik hadir/telat/minggu ini, pencarian,
+  filter tanggal, absen manual, detail riwayat per orang
+- **Scan** — hub 3 metode: RFID (pendaftaran & polling kartu baru real-time),
+  Wajah (simulasi deteksi + daftar contoh), Sidik Jari (simulasi + daftar contoh)
+- **Pengaturan** — notifikasi, kelola data wajah/sidik jari (placeholder),
+  backup database (.db) & export laporan (.csv), akun, logout
 
 ## Menjalankan di komputer (mode desktop/dev)
 
@@ -21,69 +22,50 @@ pip install -r requirements.txt
 flet run main.py
 ```
 
-Ini akan membuka window desktop. Kalau mau lihat di browser dulu untuk testing cepat:
+Mode web untuk testing cepat:
 
 ```bash
 flet run --web main.py
 ```
 
-## Menjalankan di HP tanpa build APK (mode Flet App / hot reload)
+## Menjalankan di HP tanpa build APK
 
-1. Install app **Flet** dari Play Store / App Store di HP kamu.
-2. Di komputer, jalankan:
-   ```bash
-   flet run main.py
-   ```
-3. Scan QR code yang muncul di terminal pakai app Flet di HP — mirip alur Expo Go.
+1. Install app **Flet** dari Play Store / App Store.
+2. Di komputer: `flet run main.py`
+3. Scan QR code yang muncul di terminal.
 
-## Build jadi APK Android beneran
+## Build jadi APK Android
 
 ```bash
 flet build apk
 ```
 
-File `.apk` hasilnya ada di folder `build/apk/`. (Butuh Flutter SDK ter-install;
-`flet build` akan kasih tahu kalau ada yang kurang.)
-
 ## Konfigurasi backend
 
-Buka `api.py`, ganti baris ini sesuai domain ngrok/backend kamu (harus 1 domain
-yang sama dengan sebelumnya dipakai di App.js):
-
-```python
-BASE_URL = "https://democracy-limpness-that.ngrok-free.dev"
-```
-
-Endpoint yang dipakai (harus sudah ada di backend FastAPI kamu):
-
-| Method | Path | Keterangan |
-|---|---|---|
-| GET | `/attendance` | daftar absensi |
-| POST | `/attendance` | absen manual, body `{ "name": "..." }` |
-| GET | `/rfid/cards` | daftar kartu terdaftar |
-| POST | `/rfid/cards` | daftarkan kartu, body `{ "uid": "...", "name": "..." }` |
-| DELETE | `/rfid/cards/{uid}` | hapus kartu |
-| GET | `/rfid/last-unknown` | kartu baru yang belum terdaftar (atau `null`) |
-| GET | `/backup/database` | download file `.db` |
-| GET | `/attendance/export` | download laporan `.csv` |
+Ganti `DEFAULT_BASE_URL` di `api.py`, atau langsung dari tab **Pengaturan > URL
+Backend** di dalam app (tersimpan permanen di HP, tidak perlu build ulang APK).
 
 ## Struktur file
 
 ```
-main.py              # entrypoint, NavigationBar 5 tab
-theme.py              # palet warna (sama dengan COLORS di App.js)
-utils.py              # helper tanggal/jam/status (port toDate, getStatus, dst.)
-api.py                # semua pemanggilan backend (httpx async)
-screens_static.py     # tab Live & Riwayat (mock)
-screen_attendance.py  # tab Absensi (fetch real + polling + filter + modal)
-screen_cards.py        # tab Kartu RFID (fetch real + polling + register/delete)
-screen_settings.py    # tab Pengaturan (backup & export)
+main.py               # entrypoint, NavigationBar 4 tab
+theme.py               # palet warna "Absensi Digital" — 1 aksen per metode scan
+utils.py               # helper tanggal/jam/status
+api.py                 # semua pemanggilan backend (httpx async)
+screen_home.py         # tab Beranda — dashboard ringkasan
+screen_attendance.py   # tab Absensi (fetch real + polling + filter + modal)
+screen_scan.py          # tab Scan — hub RFID / Wajah* / Sidik Jari*
+screen_cards.py         # komponen RFID (dipakai embedded di screen_scan.py)
+screen_settings.py     # tab Pengaturan
+screen_login.py        # layar login
+local_storage.py       # penyimpanan lokal kecil (base_url, token sesi)
 ```
+
+*Wajah & Sidik Jari: lihat badge "Mode Simulasi" di layar Scan — belum
+terhubung ke hardware/model asli, murni contoh interaksi & tampilan.*
 
 ## Catatan versi Flet
 
-Kode ini ditulis & diverifikasi untuk **Flet 0.86.x**, yaitu API terbaru
-(`ft.run()`, `page.show_dialog()`/`page.pop_dialog()`, `ft.Icons.NAMA_ICON`
-huruf besar semua, dst). Kalau `pip install flet` di komputer kamu menarik
-versi jauh lebih lama (< 0.70-an), beberapa nama fungsi bisa beda — tinggal
-`pip install --upgrade flet` untuk menyamakan.
+Ditulis & diverifikasi untuk **Flet 0.86.x** (`ft.run()`, `page.show_dialog()`
+/`page.pop_dialog()`, `ft.Icons.NAMA_ICON` huruf besar semua). Kalau versi
+Flet kamu jauh lebih lama, jalankan `pip install --upgrade flet`.

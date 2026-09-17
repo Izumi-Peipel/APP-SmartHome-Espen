@@ -11,8 +11,12 @@ POLL_INTERVAL_S = 3
 
 
 class CardsView:
-    def __init__(self, page: ft.Page):
+    def __init__(self, page: ft.Page, embedded: bool = False):
+        """embedded=True dipakai saat CardsView ditaruh di dalam tab
+        'RFID' pada layar Scan (screen_scan.py) — menyembunyikan judul
+        besar & padding atas karena sudah ada header dari tab induknya."""
         self.page = page
+        self.embedded = embedded
         self.pending_card: dict | None = None
         self.cards: list[dict] = []
         self.loading_cards = True
@@ -52,14 +56,17 @@ class CardsView:
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
+        title_block = [] if self.embedded else [
+            ft.Text("Kartu RFID", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
+            ft.Container(height=8),
+        ]
+
         self.container = ft.Container(
-            bgcolor=C.BG,
+            bgcolor=C.BG if not self.embedded else None,
             expand=True,
-            padding=ft.Padding.only(top=16, left=16, right=16, bottom=8),
+            padding=ft.Padding.only(top=0 if self.embedded else 16, left=16, right=16, bottom=8),
             content=ft.Column(
-                [
-                    ft.Text("Kartu RFID", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
-                    ft.Container(height=8),
+                title_block + [
                     self.pending_area,
                     self.cards_header,
                     ft.Container(height=4),
@@ -205,19 +212,19 @@ class CardsView:
                 if self.submitting else ft.Text("Daftarkan Kartu", color=C.BG, weight=ft.FontWeight.BOLD)
             )
             self.pending_area.content = ft.Container(
-                bgcolor=C.SURFACE, border=ft.Border.all(1, C.ACCENT), border_radius=ft.BorderRadius.all(14),
+                bgcolor=C.RFID_SOFT, border=ft.Border.all(1, C.RFID), border_radius=ft.BorderRadius.all(14),
                 padding=ft.Padding.all(16), margin=ft.Margin.only(bottom=16),
                 content=ft.Column(
                     [
                         ft.Row(
-                            [ft.Icon(ft.Icons.CREDIT_CARD, color=C.ACCENT, size=22),
+                            [ft.Icon(ft.Icons.NFC_ROUNDED, color=C.RFID, size=22),
                              ft.Text("Kartu baru terdeteksi", color=C.TEXT, size=15, weight=ft.FontWeight.BOLD)],
                             spacing=8,
                         ),
                         ft.Text(self.pending_card.get("uid", ""), color=C.TEXT_DIM, size=13, font_family="monospace"),
                         self.name_input,
                         ft.Container(
-                            content=submit_content, bgcolor=C.ACCENT, border_radius=ft.BorderRadius.all(10),
+                            content=submit_content, bgcolor=C.RFID, border_radius=ft.BorderRadius.all(10),
                             padding=ft.Padding.symmetric(vertical=12), alignment=ft.Alignment.CENTER,
                             on_click=None if self.submitting else lambda e: self.page.run_task(self._submit_register, e),
                         ),
