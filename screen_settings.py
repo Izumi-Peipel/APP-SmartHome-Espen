@@ -10,6 +10,8 @@ from face_engine import FaceEngine
 
 ROWS = [
     ("notifications_outline", "Pengaturan Notifikasi"),
+    ("schedule_outline", "Jam Kerja & Keterlambatan"),
+    ("router_outline", "Kelola Perangkat RFID"),
     ("face_outline", "Kelola Data Wajah"),
     ("finger_outline", "Kelola Data Sidik Jari"),
     ("cloud_outline", "Penyimpanan & Backup"),
@@ -19,6 +21,8 @@ ROWS = [
 
 _ICON_MAP = {
     "notifications_outline": ft.Icons.NOTIFICATIONS_OUTLINED,
+    "schedule_outline": ft.Icons.SCHEDULE_OUTLINED,
+    "router_outline": ft.Icons.ROUTER_OUTLINED,
     "face_outline": ft.Icons.FACE_RETOUCHING_NATURAL_OUTLINED,
     "finger_outline": ft.Icons.FINGERPRINT_OUTLINED,
     "cloud_outline": ft.Icons.CLOUD_OUTLINED,
@@ -258,6 +262,192 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
         )
         page.show_dialog(dialog)
 
+    async def open_general_settings_dialog(e):
+        try:
+            current = await api.fetch_general_settings()
+        except Exception as ex:
+            print("Gagal ambil pengaturan umum, pakai default:", ex)
+            current = {"jam_masuk_batas": "08:00"}
+
+        jam_field = ft.TextField(
+            value=current.get("jam_masuk_batas", "08:00"), label="Jam batas masuk (format 24 jam, HH:mm)",
+            hint_text="08:00", color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+        status_text = ft.Text("", size=12)
+
+        async def save(ev):
+            value = (jam_field.value or "").strip()
+            try:
+                await api.update_general_settings(jam_masuk_batas=value)
+                status_text.value = "Tersimpan — berlaku untuk scan berikutnya."
+                status_text.color = C.SUCCESS
+            except Exception as ex:
+                status_text.value = f"Gagal: {ex}"
+                status_text.color = C.DANGER
+            status_text.update()
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("Jam Kerja & Keterlambatan", color=C.TEXT),
+            bgcolor=C.SURFACE,
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Scan 'masuk' setelah jam ini otomatis ditandai Terlambat. "
+                        "Berlaku untuk semua reader RFID.",
+                        color=C.TEXT_DIM, size=12,
+                    ),
+                    jam_field,
+                    status_text,
+                ],
+                tight=True, spacing=10,
+            ),
+            actions=[
+                ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog()),
+                ft.ElevatedButton(
+                    content=ft.Text("Simpan"), bgcolor=C.ACCENT, color=C.BG,
+                    on_click=lambda e: page.run_task(save, e),
+                ),
+            ],
+        )
+        page.show_dialog(dialog)
+
+    async def open_device_management_dialog(e):
+        """Daftar reader RFID (ESP32) yang pernah online. Tiap device bisa
+        diedit reader_id/broker MQTT-nya di sini -- perubahan langsung
+        dikirim ke device lewat MQTT (topic config/<mac>/reload), device
+        auto-restart & pakai config baru. Tidak perlu reflash firmware."""
+        list_col = ft.Column(spacing=10)
+        loading = ft.Container(content=ft.ProgressRing(color=C.ACCENT), alignment=ft.Alignment.CENTER, padding=ft.Padding.all(20))
+        list_col.controls.append(loading)
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("Kelola Perangkat RFID", color=C.TEXT),
+            bgcolor=C.SURFACE,
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Reader yang pernah terhubung. Ganti Reader ID atau broker MQTT "
+                            "di sini -- device akan otomatis reload config-nya sendiri.",
+                            color=C.TEXT_DIM, size=12,
+                        ),
+                        ft.Divider(color=C.BORDER),
+                        list_col,
+                    ],
+                    tight=True, spacing=10, scroll=ft.ScrollMode.AUTO,
+                ),
+                width=340, height=420,
+            ),
+            actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog())],
+        )
+        page.show_dialog(dialog)
+
+        def device_card(dev: dict) -> ft.Container:
+            mac = dev["mac"]
+            reader_field = ft.TextField(
+                value=dev.get("reader_id", ""), label="Reader ID",
+                color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER, text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            )
+            host_field = ft.TextField(
+                value=dev.get("mqtt_host") or "", label="Override broker MQTT (kosongkan = default)",
+                color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER, text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            )
+            port_field = ft.TextField(
+                value=str(dev.get("mqtt_port") or ""), label="Port", width=90,
+                color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER, text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            )
+            cooldown_field = ft.TextField(
+                value=str(dev.get("scan_cooldown_ms") or 3000), label="Jeda anti-scan-ganda (ms)",
+                color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER, text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            )
+            buzzer_switch = ft.Switch(
+                value=bool(dev.get("buzzer_enabled", 1)), active_color=C.ACCENT, label="Buzzer aktif",
+                label_style=ft.TextStyle(color=C.TEXT_DIM, size=12),
+            )
+            card_status = ft.Text("", size=11)
+            last_seen = dev.get("last_seen_at") or "-"
+
+            async def save(ev, mac=mac, reader_field=reader_field, host_field=host_field,
+                           port_field=port_field, cooldown_field=cooldown_field,
+                           buzzer_switch=buzzer_switch, card_status=card_status):
+                card_status.value = "Menyimpan..."
+                card_status.color = C.TEXT_DIM
+                card_status.update()
+                try:
+                    port_val = port_field.value.strip()
+                    cooldown_val = cooldown_field.value.strip()
+                    await api.update_device(
+                        mac,
+                        reader_id=reader_field.value.strip(),
+                        mqtt_host=host_field.value.strip(),
+                        mqtt_port=int(port_val) if port_val else "",
+                        scan_cooldown_ms=int(cooldown_val) if cooldown_val else 3000,
+                        buzzer_enabled=buzzer_switch.value,
+                    )
+                    card_status.value = "Tersimpan — device akan reload otomatis"
+                    card_status.color = C.SUCCESS
+                except Exception as ex:
+                    card_status.value = f"Gagal: {ex}"
+                    card_status.color = C.DANGER
+                card_status.update()
+
+            return ft.Container(
+                bgcolor=C.SURFACE_ALT, border=ft.Border.all(1, C.BORDER), border_radius=ft.BorderRadius.all(12),
+                padding=ft.Padding.all(12),
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [ft.Icon(ft.Icons.NFC_ROUNDED, color=C.RFID, size=16),
+                             ft.Text(mac, color=C.TEXT_DIM, size=11, font_family="monospace", expand=True),
+                             ft.Text(f"terakhir online: {last_seen[:16] if last_seen != '-' else '-'}", color=C.TEXT_FAINT, size=10)],
+                            spacing=6,
+                        ),
+                        reader_field,
+                        ft.Row([host_field, port_field], spacing=8),
+                        cooldown_field,
+                        buzzer_switch,
+                        ft.Row(
+                            [
+                                ft.Container(
+                                    content=ft.Text("Simpan", color=C.BG, size=12, weight=ft.FontWeight.BOLD),
+                                    bgcolor=C.ACCENT, border_radius=ft.BorderRadius.all(8),
+                                    padding=ft.Padding.symmetric(vertical=8), alignment=ft.Alignment.CENTER,
+                                    expand=True, on_click=lambda ev: page.run_task(save, ev),
+                                ),
+                                card_status,
+                            ],
+                            spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ],
+                    spacing=8,
+                ),
+            )
+
+        try:
+            devices = await api.fetch_devices()
+        except Exception as ex:
+            list_col.controls = [ft.Text(f"Gagal mengambil daftar perangkat: {ex}", color=C.DANGER, size=13)]
+            list_col.update()
+            return
+
+        list_col.controls.clear()
+        if not devices:
+            list_col.controls.append(
+                ft.Text(
+                    "Belum ada reader yang pernah online. Nyalakan ESP32 & sambungkan "
+                    "ke WiFi lewat mode setup-nya, reader akan otomatis muncul di sini.",
+                    color=C.TEXT_DIM, size=13,
+                )
+            )
+        for dev in devices:
+            list_col.controls.append(device_card(dev))
+        list_col.update()
+
     def open_backup_dialog(e):
         def do_backup(e):
             page.pop_dialog()
@@ -378,6 +568,10 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             return open_backup_dialog
         if label == "Pengaturan Notifikasi":
             return lambda e: page.run_task(open_notifications_dialog, e)
+        if label == "Jam Kerja & Keterlambatan":
+            return lambda e: page.run_task(open_general_settings_dialog, e)
+        if label == "Kelola Perangkat RFID":
+            return lambda e: page.run_task(open_device_management_dialog, e)
         if label == "Kelola Data Wajah":
             return open_face_management_dialog
         if label == "Kelola Data Sidik Jari":

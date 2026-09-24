@@ -205,6 +205,14 @@ def notification_settings_url() -> str:
     return f"{_base_url}/settings/notifications"
 
 
+def devices_url() -> str:
+    return f"{_base_url}/devices"
+
+
+def general_settings_url() -> str:
+    return f"{_base_url}/settings/general"
+
+
 def login_url() -> str:
     return f"{_base_url}/auth/login"
 
@@ -326,3 +334,42 @@ async def update_notification_settings(**kwargs) -> dict:
     r = await _request("PUT", notification_settings_url(), json=kwargs)
     r.raise_for_status()
     return r.json()
+
+
+# ------------------------------------------------------------------ calls (devices / reader RFID)
+async def fetch_devices() -> list[dict]:
+    """Daftar semua reader RFID yang pernah online, dengan config-nya saat
+    ini (reader_id, override broker MQTT kalau ada)."""
+    r = await _request("GET", devices_url())
+    r.raise_for_status()
+    return r.json()
+
+
+async def update_device(mac: str, **kwargs) -> dict:
+    """Ubah config satu reader (reader_id/label/mqtt_host/mqtt_port/
+    mqtt_user/mqtt_pass/scan_cooldown_ms/buzzer_enabled) dari app. Server
+    akan menyuruh device itu reload config lewat MQTT begitu tersimpan --
+    tidak perlu reflash/reboot manual. Kirim sebagian field saja boleh,
+    mis. update_device(mac, reader_id="pintu_belakang")."""
+    r = await _request("PUT", f"{devices_url()}/{mac}", json=kwargs)
+    data = r.json()
+    if r.status_code >= 400:
+        raise RuntimeError(data.get("error", "Gagal memperbarui device"))
+    return data
+
+
+# ------------------------------------------------------------------ calls (pengaturan umum)
+async def fetch_general_settings() -> dict:
+    """Ambil pengaturan umum, saat ini cuma { jam_masuk_batas }."""
+    r = await _request("GET", general_settings_url())
+    r.raise_for_status()
+    return r.json()
+
+
+async def update_general_settings(**kwargs) -> dict:
+    """mis. update_general_settings(jam_masuk_batas="08:30")."""
+    r = await _request("PUT", general_settings_url(), json=kwargs)
+    data = r.json()
+    if r.status_code >= 400:
+        raise RuntimeError(data.get("error", "Gagal menyimpan pengaturan umum"))
+    return data

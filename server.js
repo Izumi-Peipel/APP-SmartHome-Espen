@@ -14,9 +14,10 @@ const mqtt = require('mqtt');
 const app = express();
 const PORT = 3000; // ganti kalau port ini bentrok dengan aplikasi lain
 
-// Jam batas masuk (format 24 jam "HH:mm"). Scan "masuk" setelah jam ini
-// otomatis ditandai Terlambat. Ganti sesuai kebijakan tempat kamu.
-const JAM_MASUK_BATAS = '08:00';
+// Jam batas masuk (format 24 jam "HH:mm") dulu hardcode di sini -- sekarang
+// disimpan di tabel "settings" & bisa diubah dari app (lihat getJamMasukBatas
+// di bawah). Nilai ini cuma dipakai sebagai default kalau belum pernah diset.
+const JAM_MASUK_BATAS_DEFAULT = '08:00';
 
 // ---------- Middleware ----------
 app.use(cors()); // supaya app React Native boleh akses dari device lain
@@ -51,6 +52,26 @@ db.exec(`
     uid TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     registered_at TEXT NOT NULL
+  )
+`);
+
+// Tabel device (reader ESP32) -- supaya reader_id & (opsional) override
+// broker MQTT per reader bisa diatur dari app, tanpa reflash firmware.
+// mqtt_host/port/user/pass boleh NULL -> fallback ke broker default server
+// (dari env var MQTT_BROKER_URL/MQTT_USERNAME/MQTT_PASSWORD di bawah).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS devices (
+    mac TEXT PRIMARY KEY,
+    reader_id TEXT NOT NULL,
+    label TEXT,
+    mqtt_host TEXT,
+    mqtt_port INTEGER,
+    mqtt_user TEXT,
+    mqtt_pass TEXT,
+    scan_cooldown_ms INTEGER,
+    buzzer_enabled INTEGER,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT
   )
 `);
 
@@ -170,6 +191,8 @@ function ensureColumn(table, column, definition) {
 }
 ensureColumn('attendance', 'type', "TEXT DEFAULT 'masuk'");
 ensureColumn('attendance', 'late', 'INTEGER DEFAULT 0');
+ensureColumn('devices', 'scan_cooldown_ms', 'INTEGER');
+ensureColumn('devices', 'buzzer_enabled', 'INTEGER');
 
 // Data lama (sebelum migrasi ini) tidak punya "type", jadi default-nya
 // otomatis terisi 'masuk' oleh SQLite. Itu wajar, tidak perlu diubah manual.
@@ -189,6 +212,25 @@ function setBoolSetting(key, value) {
   } else {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(key, v);
   }
+}
+
+// Versi string (dipakai buat jam batas telat, format "HH:mm")
+function getStringSetting(key, fallback) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : fallback;
+}
+
+function setStringSetting(key, value) {
+  const existing = db.prepare('SELECT key FROM settings WHERE key = ?').get(key);
+  if (existing) {
+    db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(value, key);
+  } else {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(key, value);
+  }
+}
+
+function getJamMasukBatas() {
+  return getStringSetting('jam_masuk_batas', JAM_MASUK_BATAS_DEFAULT);
 }
 
 // UID kartu terakhir yang di-scan tapi BELUM terdaftar.
@@ -239,7 +281,7 @@ function recordAttendance(name) {
   const pulangRecord = todays.find((r) => r.type === 'pulang');
 
   if (!masukRecord) {
-    const late = time > JAM_MASUK_BATAS ? 1 : 0;
+    const late = time > getJamMasukBatas() ? 1 : 0;
     const result = db.prepare(
       'INSERT INTO attendance (name, scanned_at, type, late) VALUES (?, ?, ?, ?)'
     ).run(name, iso, 'masuk', late);
@@ -463,6 +505,28 @@ const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL;
 const MQTT_USERNAME = process.env.MQTT_USERNAME;
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 
+// Kunci sederhana supaya endpoint GET /devices/:mac (dipanggil ESP32,
+// TANPA login) tidak bisa dibaca sembarang orang yang nebak-nebak MAC
+// address -- karena responnya berisi kredensial MQTT. Set di env var
+// DEVICE_PROVISION_KEY, lalu isi field yang sama di firmware/captive
+// portal. Kalau tidak diset sama sekali, endpoint dibiarkan terbuka
+// (cukup untuk testing lokal, TIDAK disarankan untuk deploy ke publik).
+const DEVICE_PROVISION_KEY = process.env.DEVICE_PROVISION_KEY || null;
+
+// Broker default yang dipakai reader yang belum di-override lewat app
+// (parse dari MQTT_BROKER_URL, mis. "mqtts://host:8883" -> host + port)
+function parseDefaultMqtt() {
+  if (!MQTT_BROKER_URL) return { host: null, port: null };
+  try {
+    const u = new URL(MQTT_BROKER_URL);
+    return { host: u.hostname, port: Number(u.port) || (u.protocol === 'mqtts:' ? 8883 : 1883) };
+  } catch (err) {
+    console.warn('⚠️  Gagal parse MQTT_BROKER_URL untuk default device config:', err.message);
+    return { host: null, port: null };
+  }
+}
+const DEFAULT_MQTT = parseDefaultMqtt();
+
 let mqttClient = null;
 
 // Rate limit manual per reader_id -- gantinya express-rate-limit yang lama
@@ -638,6 +702,125 @@ app.delete('/rfid/cards/:uid', requireAuth, (req, res) => {
 });
 
 // ============================================================
+//  ROUTES - DEVICES (konfigurasi reader RFID dari app, tanpa reflash)
+// ============================================================
+// Alurnya:
+// 1. Firmware ESP32 boot -> WiFi konek (via WiFiManager, lihat firmware) ->
+//    GET /devices/<MAC>?key=<DEVICE_PROVISION_KEY>
+// 2. Kalau MAC belum dikenal server, otomatis didaftarkan dengan reader_id
+//    default -- langsung muncul di app, admin tinggal beri nama & atur.
+// 3. Device pakai reader_id & broker MQTT dari response ini buat connect.
+// 4. Admin ubah reader_id/broker dari app (PUT) -> server publish MQTT ke
+//    topic config/<mac>/reload -> device restart & fetch config terbaru.
+//    TIDAK PERLU buka Arduino IDE / reflash sama sekali.
+
+function checkDeviceKey(req, res) {
+  if (!DEVICE_PROVISION_KEY) return true; // belum diset = mode dev, tidak divalidasi
+  const key = req.query.key || req.headers['x-device-key'];
+  if (key !== DEVICE_PROVISION_KEY) {
+    res.status(401).json({ error: 'Device key salah atau tidak dikirim' });
+    return false;
+  }
+  return true;
+}
+
+// GET /devices/:mac -> dipanggil FIRMWARE (tanpa login), balas config reader ini
+app.get('/devices/:mac', (req, res) => {
+  try {
+    if (!checkDeviceKey(req, res)) return;
+
+    const mac = req.params.mac.toUpperCase();
+    let device = db.prepare('SELECT * FROM devices WHERE mac = ?').get(mac);
+
+    if (!device) {
+      const reader_id = `reader_${mac.replace(/:/g, '').slice(-6).toLowerCase()}`;
+      db.prepare(
+        'INSERT INTO devices (mac, reader_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)'
+      ).run(mac, reader_id, nowISOJakarta(), nowISOJakarta());
+      device = db.prepare('SELECT * FROM devices WHERE mac = ?').get(mac);
+      console.log(`📟 Device baru terdaftar otomatis: ${mac} -> ${reader_id}`);
+    } else {
+      db.prepare('UPDATE devices SET last_seen_at = ? WHERE mac = ?').run(nowISOJakarta(), mac);
+    }
+
+    res.json({
+      mac: device.mac,
+      reader_id: device.reader_id,
+      label: device.label,
+      mqtt_host: device.mqtt_host || DEFAULT_MQTT.host,
+      mqtt_port: device.mqtt_port || DEFAULT_MQTT.port,
+      mqtt_user: device.mqtt_user || MQTT_USERNAME || '',
+      mqtt_pass: device.mqtt_pass || MQTT_PASSWORD || '',
+      scan_cooldown_ms: device.scan_cooldown_ms || 3000,
+      buzzer_enabled: device.buzzer_enabled === null || device.buzzer_enabled === undefined ? 1 : device.buzzer_enabled,
+    });
+  } catch (err) {
+    console.error('GET /devices/:mac error:', err);
+    res.status(500).json({ error: 'Gagal mengambil konfigurasi device' });
+  }
+});
+
+// GET /devices -> daftar semua reader, dipakai layar "Kelola Perangkat" di app
+app.get('/devices', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM devices ORDER BY created_at DESC').all();
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /devices error:', err);
+    res.status(500).json({ error: 'Gagal mengambil daftar device' });
+  }
+});
+
+// PUT /devices/:mac -> ubah reader_id / label / override broker MQTT dari app.
+// Body boleh kirim sebagian field saja. Kirim string kosong "" pada
+// mqtt_host/user/pass untuk balik pakai broker default server.
+app.put('/devices/:mac', requireAuth, (req, res) => {
+  try {
+    const mac = req.params.mac.toUpperCase();
+    const existing = db.prepare('SELECT * FROM devices WHERE mac = ?').get(mac);
+    if (!existing) {
+      return res.status(404).json({ error: 'Device belum pernah online / belum terdaftar' });
+    }
+
+    const { reader_id, label, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, scan_cooldown_ms, buzzer_enabled } = req.body || {};
+
+    const updated = {
+      reader_id: reader_id !== undefined ? String(reader_id).trim() : existing.reader_id,
+      label: label !== undefined ? String(label).trim() : existing.label,
+      mqtt_host: mqtt_host !== undefined ? (String(mqtt_host).trim() || null) : existing.mqtt_host,
+      mqtt_port: mqtt_port !== undefined ? (Number(mqtt_port) || null) : existing.mqtt_port,
+      mqtt_user: mqtt_user !== undefined ? (String(mqtt_user).trim() || null) : existing.mqtt_user,
+      mqtt_pass: mqtt_pass !== undefined ? (String(mqtt_pass).trim() || null) : existing.mqtt_pass,
+      scan_cooldown_ms: scan_cooldown_ms !== undefined ? (Number(scan_cooldown_ms) || null) : existing.scan_cooldown_ms,
+      buzzer_enabled: buzzer_enabled !== undefined ? (buzzer_enabled ? 1 : 0) : existing.buzzer_enabled,
+    };
+
+    if (!updated.reader_id) {
+      return res.status(400).json({ error: 'reader_id tidak boleh kosong' });
+    }
+
+    db.prepare(
+      'UPDATE devices SET reader_id = ?, label = ?, mqtt_host = ?, mqtt_port = ?, mqtt_user = ?, mqtt_pass = ?, scan_cooldown_ms = ?, buzzer_enabled = ? WHERE mac = ?'
+    ).run(
+      updated.reader_id, updated.label, updated.mqtt_host, updated.mqtt_port,
+      updated.mqtt_user, updated.mqtt_pass, updated.scan_cooldown_ms, updated.buzzer_enabled, mac
+    );
+
+    // Suruh device reload config SEKARANG (tanpa nunggu reboot manual) lewat
+    // topic yang di-subscribe firmware: config/<mac>/reload
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(`config/${mac}/reload`, '1', { qos: 1 });
+    }
+
+    console.log(`🔧 Device ${mac} diperbarui:`, updated);
+    res.json({ mac, ...updated });
+  } catch (err) {
+    console.error('PUT /devices/:mac error:', err);
+    res.status(500).json({ error: 'Gagal memperbarui device' });
+  }
+});
+
+// ============================================================
 //  ROUTES - AKUN & LOGIN
 // ============================================================
 
@@ -769,8 +952,40 @@ app.put('/settings/notifications', requireAuth, (req, res) => {
   }
 });
 
+// ============================================================
+//  ROUTES - PENGATURAN UMUM (jam batas telat, dll)
+// ============================================================
+// Dulu JAM_MASUK_BATAS hardcode di kode server -- sekarang bisa diubah
+// dari app tanpa restart/edit kode.
+
+app.get('/settings/general', requireAuth, (req, res) => {
+  try {
+    res.json({ jam_masuk_batas: getJamMasukBatas() });
+  } catch (err) {
+    console.error('GET /settings/general error:', err);
+    res.status(500).json({ error: 'Gagal mengambil pengaturan umum' });
+  }
+});
+
+app.put('/settings/general', requireAuth, (req, res) => {
+  try {
+    const { jam_masuk_batas } = req.body || {};
+    if (jam_masuk_batas !== undefined) {
+      if (!/^\d{2}:\d{2}$/.test(jam_masuk_batas)) {
+        return res.status(400).json({ error: 'Format jam harus HH:mm, mis. 08:00' });
+      }
+      setStringSetting('jam_masuk_batas', jam_masuk_batas);
+    }
+    console.log('Pengaturan umum diperbarui:', { jam_masuk_batas: getJamMasukBatas() });
+    res.json({ jam_masuk_batas: getJamMasukBatas() });
+  } catch (err) {
+    console.error('PUT /settings/general error:', err);
+    res.status(500).json({ error: 'Gagal menyimpan pengaturan umum' });
+  }
+});
+
 app.get('/', (req, res) => {
-  res.send('Server absensi aktif. Endpoint HTTP: /auth/login, /auth/logout, /auth/me, /auth/change-password, GET/POST /attendance, /attendance/summary, /attendance/export, /rfid/cards, /settings/notifications, /backup/database. Scan RFID sekarang lewat MQTT topic attendance/<reader_id>/scan (lihat MQTT_BROKER_URL).');
+  res.send('Server absensi aktif. Endpoint HTTP: /auth/login, /auth/logout, /auth/me, /auth/change-password, GET/POST /attendance, /attendance/summary, /attendance/export, /rfid/cards, /devices, /settings/notifications, /backup/database. Scan RFID sekarang lewat MQTT topic attendance/<reader_id>/scan (lihat MQTT_BROKER_URL).');
 });
 
 // GET /backup/database -> download file attendance.db mentah (backup penuh)
