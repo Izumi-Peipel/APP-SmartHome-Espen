@@ -1,69 +1,148 @@
-"""face_engine.py — Pengenalan wajah LOKAL pakai OpenCV (Haar Cascade untuk
-deteksi + LBPH untuk pengenalan). Ini implementasi SUNGGUHAN (bukan mock),
-tapi sengaja pakai metode paling ringan supaya:
+"""face_engine.py — Pengenalan wajah LOKAL pakai OpenCV DNN:
+  - Deteksi wajah : YuNet  (cv2.FaceDetectorYN)
+  - Pengenalan    : SFace  (cv2.FaceRecognizerSF)
 
-1. Install-nya gampang di Windows -- `opencv-contrib-python` sudah nyediakan
-   prebuilt wheel, tidak perlu compiler/CMake seperti library `face_recognition`
-   (yang bergantung ke dlib).
-2. Semua data (foto sampel wajah & model hasil training) disimpan LOKAL di
-   folder `face_data/` di komputer ini -- TIDAK dikirim ke server.js maupun
-   internet. Kalau nanti pindah komputer, folder ini harus disalin manual.
+Ini upgrade dari versi sebelumnya (Haar Cascade + LBPH). YuNet & SFace
+adalah model resmi dari OpenCV Zoo (https://github.com/opencv/opencv_zoo),
+jauh lebih akurat & tahan terhadap sudut wajah miring / pencahayaan kurang
+ideal dibanding Haar Cascade, tapi TETAP ringan (total ~37MB model) dan
+TETAP cuma butuh `opencv-contrib-python` -- tidak perlu install dlib/
+tensorflow/pytorch yang berat & ribet compile-nya di Windows.
 
-Akurasi LBPH lebih rendah dibanding model deep-learning modern, tapi cukup
-untuk prototipe/"sementara" dengan jumlah orang terdaftar tidak terlalu
-banyak & kondisi pencahayaan konsisten. Threshold confidence bisa disetel
-lewat MATCH_THRESHOLD di bawah kalau ternyata kebanyakan salah kenal /
-kebanyakan menolak.
+Semua data (embedding wajah & konfigurasi) tetap disimpan LOKAL di folder
+`face_data/` -- TIDAK dikirim ke server.js maupun internet.
+
+------------------------------------------------------------------------
+PENTING -- FILE MODEL HARUS DIDOWNLOAD MANUAL SEKALI (tidak ikut ke-bundle
+di kode ini karena ukurannya, dan filenya disimpan pakai Git LFS di GitHub
+sehingga tidak bisa didownload otomatis lewat kode ini):
+
+1. face_data/models/face_detection_yunet_2023mar.onnx   (~228 KB)
+   https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+
+2. face_data/models/face_recognition_sface_2021dec.onnx  (~37 MB)
+   https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+
+Kalau link di atas gagal dibuka langsung, buka halaman GitHub-nya lalu klik
+tombol "Download raw file":
+   https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+   https://github.com/opencv/opencv_zoo/blob/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+
+Taruh KEDUA file .onnx itu di folder face_data/models/ (buat foldernya
+kalau belum ada) -- tepat di sebelah folder face_data/people/ yang sudah
+ada. Tanpa file ini, is_ready() akan False dan UI akan kasih tahu user.
+------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-DATA_DIR = Path("face_data")
+DATA_DIR = Path(__file__).resolve().parent / "face_data"
 PEOPLE_DIR = DATA_DIR / "people"
-MODEL_PATH = DATA_DIR / "model.yml"
-LABELS_PATH = DATA_DIR / "labels.json"
+MODELS_DIR = DATA_DIR / "models"
+YUNET_MODEL_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+SFACE_MODEL_PATH = MODELS_DIR / "face_recognition_sface_2021dec.onnx"
 CONFIG_PATH = DATA_DIR / "config.json"
 COOLDOWN_PATH = DATA_DIR / "cooldown.json"
 
-FACE_SIZE = (200, 200)  # semua crop wajah diseragamkan ke ukuran ini
+FACE_SIZE = (200, 200)  # dipakai buat crop kecil non-alignment (blur-check, liveness)
 SAMPLES_PER_PERSON = 20
 MIN_SAMPLE_INTERVAL_S = 0.35  # jeda antar sampel otomatis saat enrollment
 BLUR_MIN_VARIANCE = 60.0  # sampel di bawah ini dianggap terlalu buram, dilewati
 LIVENESS_MIN_MOTION = 1.2  # skala 0-255; di bawah ini dicurigai foto statis/layar
 
-# LBPH predict() mengembalikan "distance" (BUKAN persentase kemiripan) --
-# semakin KECIL semakin mirip. 0 = identik, biasanya di atas ~90-100 sudah
-# dianggap orang berbeda. Nilai default ini dipakai kalau belum pernah
-# diubah lewat set_threshold() (tersimpan permanen di face_data/config.json).
-DEFAULT_MATCH_THRESHOLD = 75
+# SFace mengembalikan skor KEMIRIPAN kosinus (0..1, makin BESAR makin mirip;
+# rekomendasi resmi OpenCV Zoo: >0.363 dianggap orang yang sama). Supaya
+# konsisten dengan kode lama (yang pakai istilah "distance", makin KECIL
+# makin mirip), di sini disimpan sebagai distance = 1 - kemiripan.
+# Jadi threshold makin KECIL = makin ketat (lebih sering "tidak dikenali"),
+# makin BESAR = makin longgar (lebih gampang "salah kenal").
+DEFAULT_MATCH_THRESHOLD = 0.65  # setara ambang kemiripan kosinus ~0.35
+
+# Kalau ada config.json LAMA dari versi LBPH (skala beda total, biasanya
+# nilainya di atas 2 misal default lama 75), nilai itu tidak relevan lagi
+# di skala baru ini (0..2) -- kalau dipaksa dipakai, SEMUA wajah akan
+# dianggap cocok. Nilai di atas ini dianggap "dari versi lama", direset.
+_LEGACY_THRESHOLD_CUTOFF = 2.0
 
 
 class FaceEngine:
     def __init__(self):
+        print(f"[DEBUG] face_data path yang dipakai: {DATA_DIR.resolve()}")
         PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
-        self._cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+        self._detector = None
+        self._recognizer = None
+        self._ready_error = ""
+
+        if not YUNET_MODEL_PATH.exists() or not SFACE_MODEL_PATH.exists():
+            missing = [p.name for p in (YUNET_MODEL_PATH, SFACE_MODEL_PATH) if not p.exists()]
+            self._ready_error = (
+                f"File model belum ada: {', '.join(missing)}. Download dulu dan taruh di "
+                f"folder {MODELS_DIR}/ (lihat instruksi di komentar atas file face_engine.py)."
+            )
+            print(f"⚠️  {self._ready_error}")
+        else:
+            try:
+                self._detector = cv2.FaceDetectorYN_create(
+                    str(YUNET_MODEL_PATH), "", (320, 320),
+                    score_threshold=0.7, nms_threshold=0.3, top_k=10,
+                )
+                self._recognizer = cv2.FaceRecognizerSF_create(str(SFACE_MODEL_PATH), "")
+            except Exception as ex:
+                self._ready_error = f"Gagal load model YuNet/SFace: {ex}"
+                print(f"⚠️  {self._ready_error}")
+                self._detector = None
+                self._recognizer = None
+
         self._cap: cv2.VideoCapture | None = None
-        self._recognizer = None  # dibuat lazy, cuma kalau cv2.face tersedia
-        self._labels: dict[int, str] = {}  # label numerik -> nama
+        # cache in-memory: {nama: [embedding1, embedding2, ...]} -- dibangun
+        # dari file .npy tersimpan lewat train() supaya predict() tidak
+        # baca disk berulang-ulang tiap frame.
+        self._known: dict[str, list[np.ndarray]] = {}
         self._threshold = DEFAULT_MATCH_THRESHOLD
-        self._load_model_if_exists()
+        self.train()
         self._load_config()
+
+    def is_ready(self) -> bool:
+        """False kalau model YuNet/SFace gagal dimuat (file belum
+        didownload / instalasi opencv-contrib-python bermasalah) -- UI
+        harus cek ini sebelum coba deteksi wajah."""
+        return self._detector is not None and self._recognizer is not None
+
+    def get_ready_error(self) -> str:
+        """Pesan penjelasan kalau is_ready() False, buat ditampilkan ke user."""
+        return self._ready_error or "Modul deteksi wajah belum siap."
 
     # ------------------------------------------------------------ kamera
     def open_camera(self, index: int = 0) -> bool:
         if self._cap is not None and self._cap.isOpened():
             return True
-        self._cap = cv2.VideoCapture(index)
+        # Di Windows, backend default (MSMF) sering LAMBAT/HANG saat pertama
+        # kali membuka kamera (terutama laptop dengan kamera IR + RGB
+        # sekaligus buat Windows Hello). CAP_DSHOW jauh lebih cepat & stabil
+        # buat kasus ini. Di OS lain, biarkan OpenCV pilih backend default.
+        if sys.platform.startswith("win"):
+            self._cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        else:
+            self._cap = cv2.VideoCapture(index)
+
+        if self._cap.isOpened():
+            # Batasi resolusi -- banyak webcam default ke 1280x720 atau lebih
+            # tinggi, yang bikin deteksi JAUH lebih berat per frame (bisa
+            # >1 detik/frame) dan kelihatan seperti "freeze". 640x480 sudah
+            # lebih dari cukup buat deteksi wajah jarak dekat.
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         return self._cap.isOpened()
 
     def close_camera(self):
@@ -84,24 +163,56 @@ class FaceEngine:
             return None
         return cv2.flip(frame, 1)  # mirror, lebih natural buat user
 
-    # ------------------------------------------------------------ deteksi
+    # ------------------------------------------------------------ deteksi (YuNet)
     def detect_largest_face(self, frame):
-        """Return (x, y, w, h) wajah terbesar di frame, atau None kalau
-        tidak ada wajah terdeteksi."""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(80, 80))
-        if len(faces) == 0:
+        """Return face_row (numpy array panjang 15: x,y,w,h + 5 titik
+        landmark + skor) untuk wajah terbesar di frame, atau None kalau
+        tidak ada wajah terdeteksi (atau model gagal dimuat).
+
+        CATATAN: berbeda dari versi Haar Cascade sebelumnya, return value
+        di sini BUKAN tuple (x,y,w,h) polos -- selalu ambil koordinat kotak
+        lewat box[:4] (bukan `x,y,w,h = box`), karena panjangnya 15, bukan 4.
+        Landmark tambahan ini dipakai get_embedding() untuk alignment wajah
+        (bikin SFace jauh lebih akurat dibanding crop kotak polos)."""
+        if self._detector is None:
             return None
-        # ambil yang terbesar (area w*h) -- asumsinya itu wajah paling
-        # dekat ke kamera / paling relevan
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        return int(x), int(y), int(w), int(h)
+        h, w = frame.shape[:2]
+        self._detector.setInputSize((w, h))
+        _, faces = self._detector.detect(frame)
+        if faces is None or len(faces) == 0:
+            return None
+        areas = faces[:, 2] * faces[:, 3]
+        idx = int(np.argmax(areas))
+        return faces[idx]
 
     def crop_face_gray(self, frame, box) -> np.ndarray:
-        x, y, w, h = box
+        """Crop kotak polos (BUKAN aligned) dalam grayscale, dipakai untuk
+        cek blur & liveness saja -- bukan untuk pengenalan (itu tugas
+        get_embedding())."""
+        x, y, w, h = [int(v) for v in box[:4]]
+        x, y = max(0, x), max(0, y)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         crop = gray[y:y + h, x:x + w]
+        if crop.size == 0:
+            crop = np.zeros(FACE_SIZE, dtype=np.uint8)
         return cv2.resize(crop, FACE_SIZE)
+
+    # ------------------------------------------------------------ embedding (SFace)
+    def get_embedding(self, frame, box) -> np.ndarray | None:
+        """Sejajarkan (align) wajah pakai 5 titik landmark dari YuNet, lalu
+        ekstrak vektor fitur (embedding) 128 dimensi lewat SFace. Vektor
+        inilah yang dibandingkan (bukan gambar mentah) untuk mengenali
+        siapa orangnya -- jauh lebih tahan sudut wajah & pencahayaan
+        dibanding cara lama (bandingkan piksel grayscale langsung)."""
+        if self._recognizer is None or box is None:
+            return None
+        try:
+            aligned = self._recognizer.alignCrop(frame, box)
+            feature = self._recognizer.feature(aligned)
+            return feature.flatten()
+        except Exception as ex:
+            print("Gagal ekstrak embedding wajah:", ex)
+            return None
 
     # ------------------------------------------------------------ kualitas sampel & liveness
     def blur_variance(self, gray_crop: np.ndarray) -> float:
@@ -133,10 +244,10 @@ class FaceEngine:
     # ------------------------------------------------------------ render buat Flet
     def frame_to_base64(self, frame, box=None, box_color=(91, 140, 255)) -> str:
         """Encode frame (opsional dengan kotak wajah) ke base64 JPEG,
-        siap dipasang ke ft.Image(src_base64=...)."""
+        siap dipasang ke ft.Image(src=...)."""
         display = frame.copy()
         if box is not None:
-            x, y, w, h = box
+            x, y, w, h = [int(v) for v in box[:4]]
             cv2.rectangle(display, (x, y), (x + w, y + h), box_color, 2)
         ok, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
@@ -148,15 +259,18 @@ class FaceEngine:
         folder = PEOPLE_DIR / _safe_folder(name)
         if not folder.exists():
             return 0
-        return len(list(folder.glob("*.png")))
+        return len(list(folder.glob("*.npy")))
 
-    def add_sample(self, name: str, gray_crop: np.ndarray) -> int:
-        """Simpan satu sampel wajah untuk `name`. Return jumlah sampel
-        yang sudah tersimpan untuk orang ini (setelah ditambah)."""
+    def add_sample(self, name: str, embedding: np.ndarray) -> int:
+        """Simpan satu embedding wajah untuk `name`. Return jumlah sampel
+        yang sudah tersimpan untuk orang ini (setelah ditambah), dan
+        langsung update cache in-memory supaya predict() bisa langsung
+        pakai tanpa perlu train() ulang dulu."""
         folder = PEOPLE_DIR / _safe_folder(name)
         folder.mkdir(parents=True, exist_ok=True)
-        idx = len(list(folder.glob("*.png")))
-        cv2.imwrite(str(folder / f"{idx:03d}.png"), gray_crop)
+        idx = len(list(folder.glob("*.npy")))
+        np.save(str(folder / f"{idx:03d}.npy"), embedding)
+        self._known.setdefault(name, []).append(embedding)
         return idx + 1
 
     def list_people(self) -> list[dict]:
@@ -167,7 +281,7 @@ class FaceEngine:
             return out
         for folder in sorted(PEOPLE_DIR.iterdir()):
             if folder.is_dir():
-                n = len(list(folder.glob("*.png")))
+                n = len(list(folder.glob("*.npy")))
                 if n > 0:
                     out.append({"name": folder.name.replace("_", " "), "samples": n})
         return out
@@ -177,65 +291,57 @@ class FaceEngine:
         folder = PEOPLE_DIR / _safe_folder(name)
         if folder.exists():
             shutil.rmtree(folder)
-        self.train()  # retrain tanpa orang ini
+        self.train()  # refresh cache tanpa orang ini
 
-    # ------------------------------------------------------------ training & prediksi
+    # ------------------------------------------------------------ "training" & prediksi
     def train(self) -> bool:
-        """Latih ulang model LBPH dari semua sampel di face_data/people/.
-        Return False kalau data belum cukup (butuh minimal 1 orang)."""
-        images, labels = [], []
-        label_map: dict[int, str] = {}
-        next_label = 0
+        """SFace TIDAK perlu training seperti LBPH -- di sini fungsi ini
+        cuma memuat ulang semua embedding tersimpan dari
+        face_data/people/*/*.npy ke cache in-memory (self._known), supaya
+        predict() cepat. Nama fungsi & cara pemanggilannya dari
+        screen_face.py sengaja dipertahankan sama biar tidak perlu ubah
+        banyak kode lain. Return False kalau belum ada data sama sekali."""
+        known: dict[str, list[np.ndarray]] = {}
+        if PEOPLE_DIR.exists():
+            for folder in sorted(PEOPLE_DIR.iterdir()):
+                if not folder.is_dir():
+                    continue
+                embeddings = []
+                for f in sorted(folder.glob("*.npy")):
+                    try:
+                        embeddings.append(np.load(str(f)))
+                    except Exception as ex:
+                        print(f"Gagal load sampel {f}:", ex)
+                if embeddings:
+                    known[folder.name.replace("_", " ")] = embeddings
 
-        for folder in sorted(PEOPLE_DIR.iterdir()) if PEOPLE_DIR.exists() else []:
-            if not folder.is_dir():
-                continue
-            samples = list(folder.glob("*.png"))
-            if not samples:
-                continue
-            label_map[next_label] = folder.name.replace("_", " ")
-            for f in samples:
-                img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
-                if img is not None:
-                    images.append(img)
-                    labels.append(next_label)
-            next_label += 1
-
-        if not images:
-            return False
-
-        recognizer = cv2.face.LBPHFaceRecognizer_create()
-        recognizer.train(images, np.array(labels))
-        recognizer.save(str(MODEL_PATH))
-        LABELS_PATH.write_text(json.dumps(label_map), encoding="utf-8")
-
-        self._recognizer = recognizer
-        self._labels = label_map
-        return True
-
-    def _load_model_if_exists(self):
-        if MODEL_PATH.exists() and LABELS_PATH.exists():
-            try:
-                recognizer = cv2.face.LBPHFaceRecognizer_create()
-                recognizer.read(str(MODEL_PATH))
-                self._recognizer = recognizer
-                self._labels = {int(k): v for k, v in json.loads(LABELS_PATH.read_text(encoding="utf-8")).items()}
-            except Exception as ex:
-                print("Gagal load model wajah tersimpan (perlu training ulang):", ex)
+        self._known = known
+        return len(known) > 0
 
     def has_model(self) -> bool:
-        return self._recognizer is not None and len(self._labels) > 0
+        return len(self._known) > 0
 
-    def predict(self, gray_crop: np.ndarray) -> tuple[str | None, float]:
+    def predict(self, embedding: np.ndarray | None) -> tuple[str | None, float]:
         """Return (nama, distance) kalau cocok di bawah threshold aktif,
-        atau (None, distance) kalau tidak ada yang cukup mirip / model
-        belum ada sama sekali."""
-        if not self.has_model():
-            return None, 999.0
-        label, distance = self._recognizer.predict(gray_crop)
-        if distance <= self._threshold and label in self._labels:
-            return self._labels[label], float(distance)
-        return None, float(distance)
+        atau (None, distance) kalau tidak ada yang cukup mirip / belum ada
+        wajah terdaftar sama sekali. `distance` di sini = 1 - kemiripan
+        kosinus tertinggi yang ditemukan (0 = identik, makin besar makin
+        beda) -- lihat komentar DEFAULT_MATCH_THRESHOLD di atas file ini."""
+        if embedding is None or not self.has_model() or self._recognizer is None:
+            return None, 2.0
+
+        best_name, best_distance = None, 2.0
+        for name, embeddings in self._known.items():
+            for known_emb in embeddings:
+                similarity = self._recognizer.match(embedding, known_emb, cv2.FaceRecognizerSF_FR_COSINE)
+                distance = 1.0 - float(similarity)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_name = name
+
+        if best_name is not None and best_distance <= self._threshold:
+            return best_name, best_distance
+        return None, best_distance
 
     # ------------------------------------------------------------ konfigurasi (threshold, dsb)
     def get_threshold(self) -> float:
@@ -249,7 +355,20 @@ class FaceEngine:
         if CONFIG_PATH.exists():
             try:
                 cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-                self._threshold = float(cfg.get("match_threshold", DEFAULT_MATCH_THRESHOLD))
+                value = float(cfg.get("match_threshold", DEFAULT_MATCH_THRESHOLD))
+                if value > _LEGACY_THRESHOLD_CUTOFF:
+                    # ini nilai dari versi LBPH lama (skala beda total) --
+                    # kalau dipakai apa adanya di skala baru (0..2), semua
+                    # wajah akan dianggap cocok. Reset ke default baru.
+                    print(
+                        f"⚠️  Threshold tersimpan ({value}) sepertinya dari versi lama "
+                        f"(LBPH), tidak relevan di skala baru ini. Direset ke default "
+                        f"({DEFAULT_MATCH_THRESHOLD})."
+                    )
+                    self._threshold = DEFAULT_MATCH_THRESHOLD
+                    self._save_config()
+                else:
+                    self._threshold = value
             except Exception as ex:
                 print("Gagal load config wajah, pakai default:", ex)
 

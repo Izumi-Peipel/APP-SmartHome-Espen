@@ -288,14 +288,14 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
 
         list_col = ft.Column(spacing=8)
 
-        threshold_text = ft.Text(f"Sensitivitas: {int(engine.get_threshold())}", color=C.TEXT, size=13, weight=ft.FontWeight.W_600)
+        threshold_text = ft.Text(f"Sensitivitas: {engine.get_threshold():.2f}", color=C.TEXT, size=13, weight=ft.FontWeight.W_600)
         threshold_slider = ft.Slider(
-            min=40, max=110, divisions=14, value=engine.get_threshold(),
+            min=0.2, max=1.2, divisions=20, value=max(0.2, min(1.2, engine.get_threshold())),
             active_color=C.WAJAH, inactive_color=C.BORDER,
         )
 
         def on_threshold_change(ev):
-            threshold_text.value = f"Sensitivitas: {int(threshold_slider.value)}"
+            threshold_text.value = f"Sensitivitas: {threshold_slider.value:.2f}"
             engine.set_threshold(threshold_slider.value)
             try:
                 threshold_text.update()

@@ -553,7 +553,16 @@ if (MQTT_BROKER_URL) {
       return;
     }
 
-    handleScanMessage(parsed.readerId, payload);
+    try {
+      handleScanMessage(parsed.readerId, payload);
+    } catch (err) {
+      // PENTING: tanpa try/catch ini, error apapun di sini akan jadi
+      // "uncaught exception" di event listener MQTT dan MEMATIKAN
+      // SELURUH proses Node -- efeknya semua request berikutnya (termasuk
+      // GET /rfid/last-unknown) gagal dengan "Server disconnected without
+      // sending a response", padahal bukan error request itu sendiri.
+      console.error(`❌ Error saat proses scan dari "${parsed.readerId}":`, err);
+    }
   });
 } else {
   console.warn('============================================================');
@@ -776,6 +785,21 @@ app.get('/backup/database', requireAuth, (req, res) => {
     console.error('GET /backup/database error:', err);
     res.status(500).json({ error: 'Gagal membuat backup database' });
   }
+});
+
+// ============================================================
+//  SAFETY NET -- jaring pengaman terakhir
+// ============================================================
+// Kalau ada error tak terduga yang lolos dari semua try/catch di atas
+// (di listener event, timer, dsb -- bukan di dalam route Express biasa),
+// Node secara default akan MEMATIKAN seluruh proses. Untuk server kecil
+// seperti ini kita cukup log errornya dan biarkan proses tetap hidup,
+// supaya satu bug kecil tidak bikin semua orang jadi "server disconnected".
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception (server tetap jalan):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled promise rejection (server tetap jalan):', reason);
 });
 
 // ============================================================

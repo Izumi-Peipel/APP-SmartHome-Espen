@@ -1,8 +1,14 @@
 """ScanView — hub 3 metode absensi: RFID, Wajah, Sidik Jari.
 
 RFID  : fungsional penuh (pakai CardsView yang sudah ada, embedded).
-Wajah : REAL -- pakai kamera laptop + OpenCV (lihat screen_face.py &
-        face_engine.py). Data wajah disimpan lokal di folder face_data/.
+Wajah : MASIH MODE "SEGERA HADIR" -- implementasi lama (OpenCV, lihat
+        screen_face.py & face_engine.py) sengaja TIDAK dipakai di sini
+        supaya app bisa di-build ke Android (AAB/APK). `opencv-contrib-
+        python` adalah paket native yang tidak punya wheel untuk Android,
+        dan cv2.VideoCapture cuma jalan di desktop. Kode lengkapnya tetap
+        ada di screen_face.py/face_engine.py (tidak dihapus), tinggal
+        disambungkan lagi kalau nanti arsitekturnya diubah (mis. proses
+        wajah dipindah ke server, HP cuma kirim foto).
 Sidik Jari : MASIH MODE SIMULASI -- menunggu sensor fisik (mis. R307/AS608)
 terpasang ke ESP32. Ditandai jelas dengan badge 'Mode Simulasi'.
 """
@@ -12,7 +18,6 @@ import random
 import flet as ft
 import theme as C
 from screen_cards import CardsView
-from screen_face import FaceTab
 
 METHODS = [
     {"key": "rfid", "label": "RFID", "icon": ft.Icons.NFC_ROUNDED, "color": C.RFID, "soft": C.RFID_SOFT},
@@ -46,7 +51,6 @@ class ScanView:
 
         # sub-views
         self.cards_view = CardsView(page, embedded=True)
-        self.face_tab = FaceTab(page)
         self._sidik_scanning = False
 
         self.segmented = ft.Row(spacing=8)
@@ -111,22 +115,60 @@ class ScanView:
         except Exception:
             pass
 
-        if old == "wajah":
-            self.face_tab.stop()
-
         if key == "rfid" and self._running:
             self.page.run_task(self.cards_view.start)
-        elif key == "wajah":
-            self.page.run_task(self.face_tab.start)
 
     # ------------------------------------------------------------ body per metode
     def _render_body(self):
         if self.active == "rfid":
             self.body_area.content = self.cards_view.container
         elif self.active == "wajah":
-            self.body_area.content = self.face_tab.container
+            self.body_area.content = self._build_wajah_body()
         else:
             self.body_area.content = self._build_sidik_body()
+
+    def _build_wajah_body(self) -> ft.Control:
+        """Placeholder 'Segera Hadir' -- perangkat keras/kamera untuk fitur
+        ini belum diintegrasikan ke alur produksi (sama seperti Sidik Jari),
+        jadi ditampilkan konsisten sebagai simulasi/menunggu perangkat."""
+        face_icon = ft.Icon(ft.Icons.FACE_RETOUCHING_NATURAL_ROUNDED, color=C.WAJAH, size=64)
+        status_text = ft.Text("Menunggu perangkat kamera terhubung", color=C.TEXT_DIM, size=12)
+
+        preview_box = ft.Container(
+            height=200, bgcolor=C.WAJAH_SOFT, border=ft.Border.all(1.5, C.WAJAH),
+            border_radius=ft.BorderRadius.all(18), alignment=ft.Alignment.CENTER,
+            content=ft.Column([face_icon, ft.Container(height=8), status_text],
+                               horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
+        )
+
+        info_btn = ft.Container(
+            content=ft.Row(
+                [ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=C.WAJAH, size=16),
+                 ft.Text("Info Fitur Wajah", color=C.WAJAH, size=13, weight=ft.FontWeight.W_600)],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bgcolor=C.WAJAH_SOFT, border=ft.Border.all(1, C.WAJAH), border_radius=ft.BorderRadius.all(10),
+            padding=ft.Padding.symmetric(vertical=10),
+            on_click=lambda e: self._show_coming_soon("Absensi wajah"),
+        )
+
+        return ft.Column(
+            [
+                _sim_badge(C.WAJAH, C.WAJAH_SOFT),
+                ft.Container(height=12),
+                preview_box,
+                ft.Container(height=12),
+                ft.Text(
+                    "Fitur absensi wajah masih dalam tahap persiapan perangkat keras "
+                    "(kamera khusus), sama seperti Sidik Jari. Akan diaktifkan setelah "
+                    "perangkat terhubung ke server.",
+                    color=C.TEXT_DIM, size=12,
+                ),
+                ft.Container(height=16),
+                info_btn,
+            ],
+            expand=True, scroll=ft.ScrollMode.AUTO,
+        )
 
     def _build_sidik_body(self) -> ft.Control:
         finger_icon = ft.Icon(ft.Icons.FINGERPRINT_ROUNDED, color=C.SIDIK, size=64)
@@ -246,4 +288,3 @@ class ScanView:
     def stop(self):
         self._running = False
         self.cards_view._running = False
-        self.face_tab.stop()

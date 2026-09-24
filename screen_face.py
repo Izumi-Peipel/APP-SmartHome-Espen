@@ -1,371 +1,292 @@
-"""screen_face.py — Tab 'Wajah' pada layar Scan, versi REAL (bukan mock).
-Pakai kamera laptop (OpenCV) buat live preview, pendaftaran wajah baru
-(ambil beberapa sampel otomatis), dan pengenalan (cocokkan ke data
-tersimpan lalu kirim absen lewat endpoint manual yang sudah ada di
-server.js -- tidak perlu ubah backend sama sekali).
+"""ScanView — hub metode absensi: RFID, Wajah, Sidik Jari.
 
-Kamera hanya dibuka selama tab ini aktif (dipanggil dari screen_scan.py
-lewat start()/stop()), supaya tidak mengunci webcam terus-menerus."""
+RFID  : fungsional penuh (pakai CardsView yang sudah ada, embedded).
+Wajah : MASIH MODE "SEGERA HADIR" -- implementasi lama (OpenCV, lihat
+        screen_face.py & face_engine.py) sengaja TIDAK dipakai di sini
+        supaya app bisa di-build ke Android (AAB/APK). `opencv-contrib-
+        python` adalah paket native (C/C++) yang tidak punya wheel untuk
+        Android, dan cv2.VideoCapture yang dipakai buka kamera cuma jalan
+        di desktop -- bukan lewat API kamera Android. Kode lengkapnya
+        tetap ada di screen_face.py/face_engine.py (tidak dihapus), tinggal
+        disambungkan lagi kalau nanti ada versi khusus desktop, atau kalau
+        arsitekturnya diubah (mis. proses wajah dipindah ke server, HP
+        cuma kirim foto -- mirip alur RFID lewat MQTT sekarang).
+Sidik Jari : MASIH MODE SIMULASI -- menunggu sensor fisik (mis. R307/AS608)
+terpasang ke ESP32. Ditandai jelas dengan badge 'Mode Simulasi'.
+"""
 
 import asyncio
-import time
-from collections import deque
+import random
 import flet as ft
 import theme as C
-import api
-from face_engine import FaceEngine, SAMPLES_PER_PERSON
+from screen_cards import CardsView
 
-RECOGNIZE_COOLDOWN_S = 30  # jeda sebelum orang yang sama bisa absen lagi via wajah
-LOOP_INTERVAL_S = 0.12  # ~8 fps, cukup ringan buat laptop rata-rata
-MOTION_WINDOW = 6  # jumlah crop kecil yang disimpan buat cek liveness (~0.7 detik)
+METHODS = [
+    {"key": "rfid", "label": "RFID", "icon": ft.Icons.NFC_ROUNDED, "color": C.RFID, "soft": C.RFID_SOFT},
+    {"key": "wajah", "label": "Wajah", "icon": ft.Icons.FACE_RETOUCHING_NATURAL_ROUNDED, "color": C.WAJAH, "soft": C.WAJAH_SOFT},
+    {"key": "sidik", "label": "Sidik Jari", "icon": ft.Icons.FINGERPRINT_ROUNDED, "color": C.SIDIK, "soft": C.SIDIK_SOFT},
+]
+
+_MOCK_SIDIK = [
+    {"name": "Budi Santoso", "jari": "Telunjuk Kanan"},
+    {"name": "Rina Wulandari", "jari": "Jempol Kanan"},
+]
 
 
-class FaceTab:
+def _sim_badge(color: str, soft: str) -> ft.Container:
+    return ft.Container(
+        content=ft.Row(
+            [ft.Icon(ft.Icons.SCIENCE_OUTLINED, size=13, color=color),
+             ft.Text("Mode Simulasi — hardware belum terpasang", size=11, color=color, weight=ft.FontWeight.W_600)],
+            spacing=6, tight=True,
+        ),
+        bgcolor=soft, border_radius=ft.BorderRadius.all(999),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+    )
+
+
+class ScanView:
     def __init__(self, page: ft.Page):
         self.page = page
-        self.engine = FaceEngine()
+        self.active = "rfid"
+        self._running = False
 
-        self._active = False
-        self._latest_frame = None
-        self._latest_box = None
-        self._last_sample_time = 0.0
-        self._enroll_name: str | None = None
-        self._enroll_target = SAMPLES_PER_PERSON
-        self._enroll_progress_cb = None
-        self._recognizing = False
-        self._motion_crops = deque(maxlen=MOTION_WINDOW)  # buat cek liveness sederhana
+        # sub-views
+        self.cards_view = CardsView(page, embedded=True)
+        self._sidik_scanning = False
 
-        # ---- UI ----
-        self.preview_img = ft.Container(
-            height=220, bgcolor=C.WAJAH_SOFT, border=ft.Border.all(1.5, C.WAJAH),
-            border_radius=ft.BorderRadius.all(18), alignment=ft.Alignment.CENTER,
+        self.segmented = ft.Row(spacing=8)
+        self._build_segmented()
+
+        self.body_area = ft.Container(expand=True)
+
+        self.container = ft.Container(
+            bgcolor=C.BG,
+            expand=True,
+            padding=ft.Padding.only(top=20, left=16, right=16, bottom=8),
             content=ft.Column(
-                [ft.Icon(ft.Icons.CAMERA_ALT_OUTLINED, color=C.WAJAH, size=40),
-                 ft.Text("Membuka kamera...", color=C.TEXT_DIM, size=12)],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8,
+                [
+                    ft.Text("Scan Absensi", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
+                    ft.Text("Pilih metode yang ingin digunakan", size=12, color=C.TEXT_DIM),
+                    ft.Container(height=14),
+                    self.segmented,
+                    ft.Container(height=14),
+                    self.body_area,
+                ],
+                expand=True,
             ),
         )
-        self.status_text = ft.Text("Arahkan wajah ke kamera", color=C.TEXT_DIM, size=12)
 
-        self.scan_btn_text = ft.Text("Deteksi & Absen Sekarang", color=C.BG, weight=ft.FontWeight.BOLD)
-        self.scan_btn = ft.Container(
-            content=self.scan_btn_text, bgcolor=C.WAJAH, border_radius=ft.BorderRadius.all(10),
-            padding=ft.Padding.symmetric(vertical=12), alignment=ft.Alignment.CENTER,
-            on_click=lambda e: self.page.run_task(self._do_recognize),
+        self._render_body()
+
+    # ------------------------------------------------------------ segmented control
+    def _build_segmented(self):
+        chips = []
+        for m in METHODS:
+            active = self.active == m["key"]
+            chips.append(
+                ft.Container(
+                    expand=True,
+                    bgcolor=m["soft"] if active else C.SURFACE,
+                    border=ft.Border.all(1.5 if active else 1, m["color"] if active else C.BORDER),
+                    border_radius=ft.BorderRadius.all(12),
+                    padding=ft.Padding.symmetric(vertical=10),
+                    on_click=lambda e, k=m["key"]: self.set_active(k),
+                    content=ft.Column(
+                        [
+                            ft.Icon(m["icon"], color=m["color"] if active else C.TEXT_DIM, size=18),
+                            ft.Text(m["label"], size=11, weight=ft.FontWeight.W_600,
+                                    color=m["color"] if active else C.TEXT_DIM),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4,
+                    ),
+                )
+            )
+        self.segmented.controls = chips
+
+    def set_active(self, key: str):
+        if key == self.active:
+            return
+        old = self.active
+        self.active = key
+        self._build_segmented()
+        self._render_body()
+        try:
+            self.segmented.update()
+            self.body_area.update()
+        except Exception:
+            pass
+
+        if key == "rfid" and self._running:
+            self.page.run_task(self.cards_view.start)
+
+    # ------------------------------------------------------------ body per metode
+    def _render_body(self):
+        if self.active == "rfid":
+            self.body_area.content = self.cards_view.container
+        elif self.active == "wajah":
+            self.body_area.content = self._build_wajah_body()
+        else:
+            self.body_area.content = self._build_sidik_body()
+
+    def _build_wajah_body(self) -> ft.Control:
+        """Placeholder 'Segera Hadir' -- perangkat keras/kamera untuk fitur
+        ini belum diintegrasikan ke alur produksi (sama seperti Sidik Jari),
+        jadi ditampilkan konsisten sebagai simulasi/menunggu perangkat."""
+        face_icon = ft.Icon(ft.Icons.FACE_RETOUCHING_NATURAL_ROUNDED, color=C.WAJAH, size=64)
+        status_text = ft.Text("Menunggu perangkat kamera terhubung", color=C.TEXT_DIM, size=12)
+
+        preview_box = ft.Container(
+            height=200, bgcolor=C.WAJAH_SOFT, border=ft.Border.all(1.5, C.WAJAH),
+            border_radius=ft.BorderRadius.all(18), alignment=ft.Alignment.CENTER,
+            content=ft.Column([face_icon, ft.Container(height=8), status_text],
+                               horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
         )
 
-        self.enrolled_label = ft.Text("WAJAH TERDAFTAR", color=C.TEXT_DIM, size=12, weight=ft.FontWeight.W_600)
-        self.enrolled_col = ft.Column(spacing=8)
-        self.enrolled_empty = ft.Text("Belum ada wajah terdaftar", color=C.TEXT_DIM, size=13)
-
-        self.add_face_btn = ft.Container(
+        info_btn = ft.Container(
             content=ft.Row(
-                [ft.Icon(ft.Icons.ADD_ROUNDED, color=C.WAJAH, size=16),
-                 ft.Text("Daftarkan Wajah Baru", color=C.WAJAH, size=13, weight=ft.FontWeight.W_600)],
+                [ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=C.WAJAH, size=16),
+                 ft.Text("Info Fitur Wajah", color=C.WAJAH, size=13, weight=ft.FontWeight.W_600)],
                 spacing=6, alignment=ft.MainAxisAlignment.CENTER,
             ),
             bgcolor=C.WAJAH_SOFT, border=ft.Border.all(1, C.WAJAH), border_radius=ft.BorderRadius.all(10),
             padding=ft.Padding.symmetric(vertical=10),
-            on_click=self._open_enroll_dialog,
+            on_click=lambda e: self._show_coming_soon("Absensi wajah"),
         )
 
-        real_badge = ft.Container(
-            content=ft.Row(
-                [ft.Icon(ft.Icons.VIDEOCAM_ROUNDED, size=13, color=C.SUCCESS),
-                 ft.Text("Kamera laptop aktif — pengenalan lokal via OpenCV", size=11, color=C.SUCCESS, weight=ft.FontWeight.W_600)],
-                spacing=6, tight=True,
-            ),
-            bgcolor="#132A22", border_radius=ft.BorderRadius.all(999),
-            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-        )
-
-        self.container = ft.Column(
+        return ft.Column(
             [
-                real_badge,
+                _sim_badge(C.WAJAH, C.WAJAH_SOFT),
                 ft.Container(height=12),
-                self.preview_img,
-                ft.Container(height=8),
-                self.status_text,
-                ft.Container(height=8),
-                self.scan_btn,
-                ft.Container(height=20),
-                self.enrolled_label,
-                ft.Container(height=8),
-                self.enrolled_col,
-                self.enrolled_empty,
-                ft.Container(height=10),
-                self.add_face_btn,
+                preview_box,
+                ft.Container(height=12),
+                ft.Text(
+                    "Fitur absensi wajah masih dalam tahap persiapan perangkat keras "
+                    "(kamera khusus), sama seperti Sidik Jari. Akan diaktifkan setelah "
+                    "perangkat terhubung ke server.",
+                    color=C.TEXT_DIM, size=12,
+                ),
+                ft.Container(height=16),
+                info_btn,
             ],
             expand=True, scroll=ft.ScrollMode.AUTO,
         )
 
-        self._refresh_enrolled_list()
+    def _build_sidik_body(self) -> ft.Control:
+        finger_icon = ft.Icon(ft.Icons.FINGERPRINT_ROUNDED, color=C.SIDIK, size=64)
+        status_text = ft.Text("Tempelkan jari ke sensor", color=C.TEXT_DIM, size=12)
 
-    # ------------------------------------------------------------ lifecycle
-    async def start(self):
-        if self._active:
-            return
-        self.engine.reload_config()  # kalau threshold sempat diubah lewat Pengaturan
-        ok = await asyncio.to_thread(self.engine.open_camera)
-        if not ok:
-            self.status_text.value = "Gagal membuka kamera laptop (dipakai app lain? / izin kamera ditolak?)"
-            self.status_text.color = C.DANGER
-            self._safe_update(self.status_text)
-            return
-        self._active = True
-        self.page.run_task(self._loop)
-
-    def stop(self):
-        self._active = False
-        self._enroll_name = None
-        self._motion_crops.clear()
-        self.engine.close_camera()
-
-    def _safe_update(self, control):
-        try:
-            control.update()
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------ loop kamera
-    async def _loop(self):
-        while self._active:
-            frame = await asyncio.to_thread(self.engine.read_frame)
-            if frame is None:
-                await asyncio.sleep(0.2)
-                continue
-
-            box = await asyncio.to_thread(self.engine.detect_largest_face, frame)
-            self._latest_frame = frame
-            self._latest_box = box
-
-            b64 = await asyncio.to_thread(self.engine.frame_to_base64, frame, box)
-            self.preview_img.content = ft.Image(
-                src_base64=b64, fit=ft.ImageFit.COVER,
-                border_radius=ft.BorderRadius.all(16), width=1000, height=220,
-            )
-            self._safe_update(self.preview_img)
-
-            if box is not None:
-                # simpan crop kecil buat cek liveness (gerakan mikro) nanti
-                small = await asyncio.to_thread(self._small_crop, frame, box)
-                self._motion_crops.append(small)
-
-                # auto-capture sampel kalau lagi mode enrollment -- lewati
-                # kalau buram, supaya data training tidak rusak
-                if self._enroll_name:
-                    now = time.time()
-                    if now - self._last_sample_time >= 0.35:
-                        gray = await asyncio.to_thread(self.engine.crop_face_gray, frame, box)
-                        if not await asyncio.to_thread(self.engine.is_blurry, gray):
-                            count = await asyncio.to_thread(self.engine.add_sample, self._enroll_name, gray)
-                            self._last_sample_time = now
-                            if self._enroll_progress_cb:
-                                self._enroll_progress_cb(count)
-                            if count >= self._enroll_target:
-                                self._enroll_name = None  # target tercapai, UI dialog yang lanjut training
-                        else:
-                            self._last_sample_time = now - 0.2  # coba lagi sedikit lebih cepat
-
-            await asyncio.sleep(LOOP_INTERVAL_S)
-
-    def _small_crop(self, frame, box):
-        import cv2
-        x, y, w, h = box
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(gray[y:y + h, x:x + w], (50, 50))
-
-    # ------------------------------------------------------------ deteksi & absen
-    async def _do_recognize(self):
-        if self._recognizing:
-            return
-        if self._latest_frame is None or self._latest_box is None:
-            self.status_text.value = "Wajah belum terdeteksi di kamera. Pastikan wajah terlihat jelas."
-            self.status_text.color = C.LATE
-            self._safe_update(self.status_text)
-            return
-        if not self.engine.has_model():
-            self.status_text.value = "Belum ada wajah terdaftar. Daftarkan wajah dulu lewat tombol di bawah."
-            self.status_text.color = C.LATE
-            self._safe_update(self.status_text)
-            return
-
-        # Liveness sederhana: tolak kalau beberapa frame terakhir nyaris
-        # identik (indikasi foto/layar HP yang dipegang diam). Bukan
-        # anti-spoofing yang kuat, tapi menyaring kasus paling gampang.
-        if await asyncio.to_thread(self.engine.is_likely_static, list(self._motion_crops)):
-            self.status_text.value = (
-                "Terdeteksi seperti gambar statis (foto/layar). Gerakkan wajah "
-                "sedikit (kedip/geleng pelan) lalu coba lagi."
-            )
-            self.status_text.color = C.LATE
-            self._safe_update(self.status_text)
-            return
-
-        self._recognizing = True
-        self.scan_btn_text.value = "Mencocokkan..."
-        self._safe_update(self.scan_btn)
-
-        frame, box = self._latest_frame, self._latest_box
-        gray = await asyncio.to_thread(self.engine.crop_face_gray, frame, box)
-        name, distance = await asyncio.to_thread(self.engine.predict, gray)
-
-        if name:
-            now = time.time()
-            last_ts = await asyncio.to_thread(self.engine.get_last_recognized_at, name)
-            if last_ts and (now - last_ts) < RECOGNIZE_COOLDOWN_S:
-                sisa = int(RECOGNIZE_COOLDOWN_S - (now - last_ts))
-                self.status_text.value = f"{name} sudah tercatat barusan. Coba lagi {sisa} detik lagi."
-                self.status_text.color = C.TEXT_DIM
-            else:
-                try:
-                    await api.post_manual_attendance(name)
-                    await asyncio.to_thread(self.engine.mark_recognized_now, name, now)
-                    self.status_text.value = f"✓ Absen tercatat untuk {name} (jarak {distance:.0f})"
-                    self.status_text.color = C.SUCCESS
-                except Exception as ex:
-                    self.status_text.value = f"Wajah dikenali ({name}) tapi gagal simpan absen: {ex}"
-                    self.status_text.color = C.DANGER
-        else:
-            self.status_text.value = f"Wajah tidak dikenali (jarak {distance:.0f}). Coba lagi atau daftarkan wajah baru."
-            self.status_text.color = C.LATE
-
-        self.scan_btn_text.value = "Deteksi & Absen Sekarang"
-        self._safe_update(self.scan_btn)
-        self._safe_update(self.status_text)
-        self._recognizing = False
-
-    # ------------------------------------------------------------ enrollment dialog
-    def _open_enroll_dialog(self, e):
-        name_field = ft.TextField(
-            hint_text="Nama lengkap", color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
-            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
-        )
-        progress_text = ft.Text(f"Sampel: 0/{self._enroll_target}", color=C.TEXT_DIM, size=13)
-        hint_text = ft.Text(
-            "Pastikan wajah terlihat jelas & pencahayaan cukup. Gerakkan kepala sedikit "
-            "(kiri/kanan/atas/bawah) selama pengambilan sampel supaya modelnya lebih akurat.",
-            color=C.TEXT_DIM, size=11,
+        preview_box = ft.Container(
+            height=200, bgcolor=C.SIDIK_SOFT, border=ft.Border.all(1.5, C.SIDIK),
+            border_radius=ft.BorderRadius.all(18), alignment=ft.Alignment.CENTER,
+            content=ft.Column([finger_icon, ft.Container(height=8), status_text],
+                               horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
         )
 
-        start_btn = ft.TextButton(content=ft.Text("Mulai Ambil Sampel", color=C.WAJAH, weight=ft.FontWeight.W_600))
-        finish_btn = ft.TextButton(content=ft.Text("Selesai & Latih", color=C.SUCCESS, weight=ft.FontWeight.W_600), disabled=True)
-        cancel_btn = ft.TextButton(content=ft.Text("Batal", color=C.TEXT_DIM))
+        scan_btn_text = ft.Text("Simulasikan Tempel Jari", color=C.BG, weight=ft.FontWeight.BOLD)
+        scan_btn = ft.Container(
+            content=scan_btn_text, bgcolor=C.SIDIK, border_radius=ft.BorderRadius.all(10),
+            padding=ft.Padding.symmetric(vertical=12), alignment=ft.Alignment.CENTER,
+        )
 
-        def on_progress(count):
-            progress_text.value = f"Sampel: {count}/{self._enroll_target}"
-            finish_btn.disabled = count < 5
-            self._safe_update(progress_text)
-            self._safe_update(finish_btn)
-            if count >= self._enroll_target:
-                self.page.run_task(do_finish, None)
-
-        self._enroll_progress_cb = on_progress
-
-        def do_start(e):
-            name = (name_field.value or "").strip()
-            if not name:
-                name_field.error_text = "Isi nama dulu"
-                self._safe_update(name_field)
+        async def run_sim(e):
+            if self._sidik_scanning:
                 return
-            self._enroll_name = name
-            self._last_sample_time = 0
-            start_btn.disabled = True
-            name_field.disabled = True
-            self._safe_update(start_btn)
-            self._safe_update(name_field)
+            self._sidik_scanning = True
+            scan_btn_text.value = "Membaca sidik jari..."
+            status_text.value = "Mencocokkan pola guratan..."
+            scan_btn.update()
+            status_text.update()
+            await asyncio.sleep(1.4)
+            person = random.choice(_MOCK_SIDIK)
+            status_text.value = f"Simulasi cocok dengan: {person['name']} ({person['jari']})"
+            status_text.color = C.SUCCESS
+            scan_btn_text.value = "Simulasikan Tempel Jari"
+            scan_btn.update()
+            status_text.update()
+            self._sidik_scanning = False
 
-        async def do_finish(e):
-            self._enroll_progress_cb = None
-            self._enroll_name = None
-            name = (name_field.value or "").strip()
-            if name and self.engine.sample_count(name) >= 1:
-                await asyncio.to_thread(self.engine.train)
-                self._refresh_enrolled_list()
-                self._show_snack(f"Wajah '{name}' terdaftar & model dilatih ulang.")
-            self.page.pop_dialog()
+        scan_btn.on_click = lambda e: self.page.run_task(run_sim, e)
 
-        def do_cancel(e):
-            self._enroll_progress_cb = None
-            self._enroll_name = None
-            self.page.pop_dialog()
-
-        start_btn.on_click = do_start
-        finish_btn.on_click = lambda e: self.page.run_task(do_finish, e)
-        cancel_btn.on_click = do_cancel
-
-        dialog = ft.AlertDialog(
-            title=ft.Text("Daftarkan Wajah Baru", color=C.TEXT),
-            bgcolor=C.SURFACE,
-            content=ft.Column(
-                [name_field, hint_text, progress_text],
-                tight=True, spacing=10, width=300,
-            ),
-            actions=[cancel_btn, start_btn, finish_btn],
-        )
-        self.page.show_dialog(dialog)
-
-    # ------------------------------------------------------------ list & delete
-    def _refresh_enrolled_list(self):
-        people = self.engine.list_people()
-        self.enrolled_label.value = f"WAJAH TERDAFTAR ({len(people)})"
-        self.enrolled_empty.visible = len(people) == 0
-
-        rows = []
-        for p in people:
-            rows.append(
+        enrolled_label = ft.Text(f"SIDIK JARI TERDAFTAR (contoh) · {len(_MOCK_SIDIK)}", color=C.TEXT_DIM, size=12,
+                                  weight=ft.FontWeight.W_600)
+        enrolled_rows = []
+        for p in _MOCK_SIDIK:
+            enrolled_rows.append(
                 ft.Container(
                     bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=ft.BorderRadius.all(12),
                     padding=ft.Padding.all(12),
                     content=ft.Row(
                         [
                             ft.Container(
-                                content=ft.Icon(ft.Icons.PERSON_ROUNDED, color=C.WAJAH, size=18),
+                                content=ft.Icon(ft.Icons.FINGERPRINT_ROUNDED, color=C.SIDIK, size=18),
                                 width=36, height=36, border_radius=ft.BorderRadius.all(18),
-                                bgcolor=C.WAJAH_SOFT, alignment=ft.Alignment.CENTER,
+                                bgcolor=C.SIDIK_SOFT, alignment=ft.Alignment.CENTER,
                             ),
                             ft.Column(
                                 [ft.Text(p["name"], color=C.TEXT, size=14, weight=ft.FontWeight.W_600),
-                                 ft.Text(f"{p['samples']} sampel", color=C.TEXT_DIM, size=11)],
+                                 ft.Text(p["jari"], color=C.TEXT_DIM, size=11)],
                                 spacing=2, expand=True,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.DELETE_OUTLINE, icon_color=C.DANGER, icon_size=18,
-                                on_click=lambda e, n=p["name"]: self._confirm_delete(n),
                             ),
                         ],
                         spacing=10,
                     ),
                 )
             )
-        self.enrolled_col.controls = rows
-        self._safe_update(self.enrolled_col)
-        self._safe_update(self.enrolled_label)
-        self._safe_update(self.enrolled_empty)
 
-    def _confirm_delete(self, name: str):
-        def do_delete(e):
-            self.page.pop_dialog()
-            self.engine.delete_person(name)
-            self._refresh_enrolled_list()
-            self._show_snack(f"Wajah '{name}' dihapus.")
+        add_finger_btn = ft.Container(
+            content=ft.Row(
+                [ft.Icon(ft.Icons.ADD_ROUNDED, color=C.SIDIK, size=16),
+                ft.Text("Daftarkan Sidik Jari Baru", color=C.SIDIK, size=13, weight=ft.FontWeight.W_600)],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SIDIK_SOFT, border=ft.Border.all(1, C.SIDIK), border_radius=ft.BorderRadius.all(10),
+            padding=ft.Padding.symmetric(vertical=10),
+            on_click=lambda e: self._show_coming_soon("Pendaftaran sidik jari"),
+        )
 
-        dialog = ft.AlertDialog(
-            title=ft.Text("Hapus Wajah", color=C.TEXT), bgcolor=C.SURFACE,
-            content=ft.Text(f"Hapus semua data wajah milik {name}?", color=C.TEXT_DIM),
-            actions=[
-                ft.TextButton(content=ft.Text("Batal", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog()),
-                ft.TextButton(content=ft.Text("Hapus", color=C.DANGER), on_click=do_delete),
+        return ft.Column(
+            [
+                _sim_badge(C.SIDIK, C.SIDIK_SOFT),
+                ft.Container(height=12),
+                preview_box,
+                ft.Container(height=12),
+                scan_btn,
+                ft.Container(height=20),
+                ft.Row([enrolled_label], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Container(height=8),
+                ft.Column(enrolled_rows, spacing=8),
+                ft.Container(height=10),
+                add_finger_btn,
             ],
+            expand=True, scroll=ft.ScrollMode.AUTO,
+        )
+
+    def _show_coming_soon(self, feature: str):
+        dialog = ft.AlertDialog(
+            title=ft.Text("Segera Hadir", color=C.TEXT),
+            bgcolor=C.SURFACE,
+            content=ft.Text(
+                f"{feature} akan aktif setelah hardware terkait terpasang dan "
+                "terhubung ke server (mirip alur LWT/MQTT pada reader RFID).",
+                color=C.TEXT_DIM,
+            ),
+            actions=[ft.TextButton(content=ft.Text("Mengerti", color=C.ACCENT), on_click=lambda e: self.page.pop_dialog())],
         )
         self.page.show_dialog(dialog)
 
-    def _show_snack(self, text: str):
-        snack = ft.SnackBar(content=ft.Text(text))
-        if hasattr(self.page, "overlay"):
-            self.page.overlay.append(snack)
-        try:
-            snack.open = True
-        except Exception:
-            pass
-        self.page.update()
+    def open_method(self, key: str):
+        """Dipanggil dari luar (mis. pintasan di Beranda) untuk langsung
+        membuka tab metode tertentu."""
+        self.set_active(key)
+
+    # ------------------------------------------------------------ lifecycle
+    async def start(self):
+        if self._running:
+            return
+        self._running = True
+        await self.cards_view.start()
+
+    def stop(self):
+        self._running = False
+        self.cards_view._running = False
