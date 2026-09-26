@@ -6,13 +6,11 @@ tidak perlu build ulang APK tiap kali domain ngrok berubah)."""
 import flet as ft
 import theme as C
 import api
-from face_engine import FaceEngine
 
 ROWS = [
     ("notifications_outline", "Pengaturan Notifikasi"),
     ("schedule_outline", "Jam Kerja & Keterlambatan"),
     ("router_outline", "Kelola Perangkat RFID"),
-    ("face_outline", "Kelola Data Wajah"),
     ("finger_outline", "Kelola Data Sidik Jari"),
     ("cloud_outline", "Penyimpanan & Backup"),
     ("person_outline", "Akun"),
@@ -23,7 +21,6 @@ _ICON_MAP = {
     "notifications_outline": ft.Icons.NOTIFICATIONS_OUTLINED,
     "schedule_outline": ft.Icons.SCHEDULE_OUTLINED,
     "router_outline": ft.Icons.ROUTER_OUTLINED,
-    "face_outline": ft.Icons.FACE_RETOUCHING_NATURAL_OUTLINED,
     "finger_outline": ft.Icons.FINGERPRINT_OUTLINED,
     "cloud_outline": ft.Icons.CLOUD_OUTLINED,
     "person_outline": ft.Icons.PERSON_OUTLINE,
@@ -469,89 +466,6 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
         )
         page.show_dialog(dialog)
 
-    def open_face_management_dialog(e):
-        """Menampilkan data wajah ASLI (dari face_data/ lokal) -- beda dengan
-        sidik jari yang masih placeholder, ini sudah pakai data sungguhan
-        hasil enrollment di tab Scan > Wajah."""
-        engine = FaceEngine()
-        people = engine.list_people()
-
-        list_col = ft.Column(spacing=8)
-
-        threshold_text = ft.Text(f"Sensitivitas: {engine.get_threshold():.2f}", color=C.TEXT, size=13, weight=ft.FontWeight.W_600)
-        threshold_slider = ft.Slider(
-            min=0.2, max=1.2, divisions=20, value=max(0.2, min(1.2, engine.get_threshold())),
-            active_color=C.WAJAH, inactive_color=C.BORDER,
-        )
-
-        def on_threshold_change(ev):
-            threshold_text.value = f"Sensitivitas: {threshold_slider.value:.2f}"
-            engine.set_threshold(threshold_slider.value)
-            try:
-                threshold_text.update()
-            except Exception:
-                pass
-
-        threshold_slider.on_change = on_threshold_change
-
-        def refresh():
-            list_col.controls.clear()
-            if not people:
-                list_col.controls.append(ft.Text("Belum ada wajah terdaftar.", color=C.TEXT_DIM, size=13))
-            for p in people:
-                def do_delete(ev, n=p["name"]):
-                    engine.delete_person(n)
-                    people[:] = engine.list_people()
-                    refresh()
-                    list_col.update()
-
-                list_col.controls.append(
-                    ft.Container(
-                        bgcolor=C.SURFACE_ALT, border=ft.Border.all(1, C.BORDER), border_radius=ft.BorderRadius.all(10),
-                        padding=ft.Padding.symmetric(horizontal=12, vertical=10),
-                        content=ft.Row(
-                            [
-                                ft.Text(p["name"], color=C.TEXT, size=14, expand=True),
-                                ft.Text(f"{p['samples']} sampel", color=C.TEXT_DIM, size=11),
-                                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, icon_color=C.DANGER, icon_size=18, on_click=do_delete),
-                            ],
-                            spacing=8,
-                        ),
-                    )
-                )
-
-        refresh()
-
-        dialog = ft.AlertDialog(
-            title=ft.Text("Kelola Data Wajah", color=C.TEXT),
-            bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "Data wajah asli (kamera laptop, disimpan lokal di folder face_data/). "
-                            "Untuk menambah wajah baru, gunakan tab Scan > Wajah.",
-                            color=C.TEXT_DIM, size=12,
-                        ),
-                        ft.Divider(color=C.BORDER),
-                        threshold_text,
-                        threshold_slider,
-                        ft.Text(
-                            "Geser ke kiri = lebih ketat (gampang menolak, jarang salah kenal). "
-                            "Geser ke kanan = lebih longgar (gampang cocok, tapi risiko salah kenal naik).",
-                            color=C.TEXT_FAINT, size=11,
-                        ),
-                        ft.Divider(color=C.BORDER),
-                        list_col,
-                    ],
-                    tight=True, spacing=10,
-                ),
-                width=320,
-            ),
-            actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog())],
-        )
-        page.show_dialog(dialog)
-
     def open_placeholder_dialog(title: str, message: str):
         def opener(e):
             dialog = ft.AlertDialog(
@@ -572,8 +486,6 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             return lambda e: page.run_task(open_general_settings_dialog, e)
         if label == "Kelola Perangkat RFID":
             return lambda e: page.run_task(open_device_management_dialog, e)
-        if label == "Kelola Data Wajah":
-            return open_face_management_dialog
         if label == "Kelola Data Sidik Jari":
             return open_placeholder_dialog(
                 "Kelola Data Sidik Jari",

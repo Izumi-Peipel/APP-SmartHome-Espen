@@ -12,7 +12,11 @@ const crypto = require('crypto'); // built-in Node -> tidak perlu npm install ta
 const mqtt = require('mqtt');
 
 const app = express();
-const PORT = 3000; // ganti kalau port ini bentrok dengan aplikasi lain
+// FIX untuk deploy ke Railway/hosting cloud lain: platform seperti Railway
+// menetapkan port secara dinamis lewat env var PORT saat runtime, BUKAN
+// selalu 3000. Fallback ke 3000 tetap dipakai kalau env var PORT tidak
+// ada (misal waktu run lokal di laptop).
+const PORT = process.env.PORT || 3000;
 
 // Jam batas masuk (format 24 jam "HH:mm") dulu hardcode di sini -- sekarang
 // disimpan di tabel "settings" & bisa diubah dari app (lihat getJamMasukBatas
@@ -37,7 +41,15 @@ const loginLimiter = rateLimit({
 });
 
 // ---------- Database ----------
-const db = new Database(path.join(__dirname, 'attendance.db'));
+// FIX untuk deploy ke Railway: filesystem Railway itu EPHEMERAL, artinya
+// semua file yang disimpan di dalam folder project (termasuk __dirname)
+// akan HILANG setiap kali container redeploy/restart. Supaya data
+// attendance.db tidak hilang, attach "Volume" di Railway (folder yang
+// permanen), lalu set env var DATA_DIR ke path mount volume itu
+// (misal DATA_DIR=/data). Kalau DATA_DIR tidak diset (misal waktu run
+// lokal di laptop), tetap pakai folder project seperti biasa.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const db = new Database(path.join(DATA_DIR, 'attendance.db'));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS attendance (
@@ -131,8 +143,13 @@ function verifyPassword(password, stored) {
 (function bootstrapDefaultAdmin() {
   const count = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
   if (count === 0) {
-    const defaultUsername = 'admin';
-    const defaultPassword = 'admin123';
+    // FIX keamanan untuk deploy publik: password default bisa di-override
+    // lewat env var ADMIN_INITIAL_PASSWORD (set ini di Railway Variables
+    // SEBELUM deploy pertama). Kalau tidak diset, tetap fallback ke
+    // "admin123" seperti sebelumnya (aman untuk testing lokal, TAPI wajib
+    // diganti manual lewat menu Akun kalau server ini dibuka ke publik).
+    const defaultUsername = process.env.ADMIN_INITIAL_USERNAME || 'admin';
+    const defaultPassword = process.env.ADMIN_INITIAL_PASSWORD || 'homeadmin109';
     db.prepare(
       'INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)'
     ).run(defaultUsername, hashPassword(defaultPassword), nowISOJakarta());
@@ -511,7 +528,7 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 // DEVICE_PROVISION_KEY, lalu isi field yang sama di firmware/captive
 // portal. Kalau tidak diset sama sekali, endpoint dibiarkan terbuka
 // (cukup untuk testing lokal, TIDAK disarankan untuk deploy ke publik).
-const DEVICE_PROVISION_KEY = process.env.DEVICE_PROVISION_KEY || null;
+const DEVICE_PROVISION_KEY = process.env.home1209025 || null;
 
 // Broker default yang dipakai reader yang belum di-override lewat app
 // (parse dari MQTT_BROKER_URL, mis. "mqtts://host:8883" -> host + port)
@@ -993,7 +1010,7 @@ app.get('/', (req, res) => {
 app.get('/backup/database', requireAuth, (req, res) => {
   try {
     const { date } = getJakartaParts();
-    res.download(path.join(__dirname, 'attendance.db'), `attendance_backup_${date}.db`, (err) => {
+    res.download(path.join(DATA_DIR, 'attendance.db'), `attendance_backup_${date}.db`, (err) => {
       if (err) console.error('GET /backup/database error:', err);
     });
   } catch (err) {
