@@ -24,7 +24,7 @@ import httpx
 
 import local_storage
 
-DEFAULT_BASE_URL = "https://democracy-limpness-that.ngrok-free.dev"
+DEFAULT_BASE_URL = "https://app-smarthome-espen-production.up.railway.app"
 _STORAGE_KEY = "base_url"
 _TOKEN_KEY = "auth_token"
 _USERNAME_KEY = "auth_username"

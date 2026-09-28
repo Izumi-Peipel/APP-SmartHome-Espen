@@ -162,6 +162,35 @@ function verifyPassword(password, stored) {
   }
 })();
 
+// Reset password admin lewat env var, TANPA perlu SSH/akses database manual.
+// Cara pakai:
+//   1. Di Railway > service ini > Variables, tambah:
+//        RESET_ADMIN_USERNAME = admin        (username yang mau direset)
+//        RESET_ADMIN_PASSWORD = passwordBaru  (password baru yang diinginkan)
+//   2. Deploy ulang (Railway otomatis redeploy begitu Variables disimpan).
+//   3. Cek Deploy Logs, cari baris "Password untuk user ... berhasil di-reset".
+//   4. PENTING: hapus lagi RESET_ADMIN_PASSWORD dari Variables setelah
+//      berhasil (kalau tidak, password akan direset ulang tiap kali
+//      service ini restart/redeploy).
+(function resetAdminPasswordIfRequested() {
+  const resetPassword = process.env.RESET_ADMIN_PASSWORD;
+  if (!resetPassword) return;
+  const targetUsername = process.env.RESET_ADMIN_USERNAME || 'admin';
+  const user = db.prepare('SELECT id FROM users WHERE username = ?').get(targetUsername);
+  console.log('============================================================');
+  if (user) {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(hashPassword(resetPassword), user.id);
+    console.log(`✅ Password untuk user "${targetUsername}" berhasil di-reset.`);
+    console.log('⚠️  SEKARANG HAPUS variable RESET_ADMIN_PASSWORD di Railway,');
+    console.log('    lalu redeploy lagi -- supaya tidak reset ulang tiap restart.');
+  } else {
+    console.log(`⚠️  RESET_ADMIN_PASSWORD diset tapi user "${targetUsername}" tidak ditemukan.`);
+    console.log('    Cek lagi nilai RESET_ADMIN_USERNAME-nya.');
+  }
+  console.log('============================================================');
+})();
+
 // Middleware: wajib login. Token bisa dikirim lewat:
 //  - header  Authorization: Bearer <token>   (dipakai semua request normal)
 //  - query   ?token=<token>                  (khusus endpoint yang dibuka
