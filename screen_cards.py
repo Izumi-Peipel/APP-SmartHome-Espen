@@ -255,7 +255,7 @@ class CardsView:
         self.cards_list.visible = (not self.loading_cards) and len(self.cards) > 0
 
         def _edit_card(self, uid: str, current_name: str):
-        name_field = ft.TextField(
+            name_field = ft.TextField(
             value=current_name, label="Nama pemilik kartu",
             color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
         )
