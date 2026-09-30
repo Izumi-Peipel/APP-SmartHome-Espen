@@ -48,6 +48,7 @@ class ScanView:
         self.page = page
         self.active = "rfid"
         self._running = False
+        self._wanted = False  # True selama tab Scan diminta aktif
 
         # sub-views
         self.cards_view = CardsView(page, embedded=True)
@@ -105,7 +106,6 @@ class ScanView:
     def set_active(self, key: str):
         if key == self.active:
             return
-        old = self.active
         self.active = key
         self._build_segmented()
         self._render_body()
@@ -279,12 +279,35 @@ class ScanView:
         self.set_active(key)
 
     # ------------------------------------------------------------ lifecycle
+    def request_start(self):
+        """Dipanggil dari main.py saat tab Scan dibuka. Aman dipanggil
+        berulang: start() sendiri menolak kalau sudah berjalan."""
+        self._wanted = True
+        self.page.run_task(self._start_if_wanted)
+
+    async def _start_if_wanted(self):
+        # Kalau user sudah pindah tab sebelum task ini sempat jalan, batal.
+        if not self._wanted:
+            return
+        await self.start()
+
     async def start(self):
         if self._running:
             return
         self._running = True
         await self.cards_view.start()
+        # Kalau tab ditinggalkan saat fetch awal berjalan, pastikan berhenti.
+        if not self._wanted:
+            self._stop_cards()
 
     def stop(self):
+        self._wanted = False
         self._running = False
-        self.cards_view._running = False
+        self._stop_cards()
+
+    def _stop_cards(self):
+        stop = getattr(self.cards_view, "stop", None)
+        if callable(stop):
+            stop()
+        else:
+            self.cards_view._running = False

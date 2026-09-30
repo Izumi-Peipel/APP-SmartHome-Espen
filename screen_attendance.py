@@ -2,9 +2,11 @@
 pencarian, filter tanggal, absen manual, dan detail riwayat per orang."""
 
 import asyncio
+import httpx
 import flet as ft
 import theme as C
 import api
+from load_banner import build_load_error_banner
 from utils import (
     format_date_time, is_today, is_this_week, is_masuk_record, is_late_record, to_date,
 )
@@ -57,6 +59,9 @@ class AttendanceView:
         self.custom_date: str | None = None
         self.last_count: int | None = None
         self._running = False
+        self._notif_token = 0
+        self.load_failed = False  # True kalau fetch terakhir gagal
+        self._loaded = False      # sudah pernah berhasil memuat data sekali?
 
         # ---- controls ----
         self.title_row = ft.Row(
@@ -64,8 +69,10 @@ class AttendanceView:
                 ft.Text("Absensi", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
                 ft.Row(
                     [
-                        ft.IconButton(icon=ft.Icons.REFRESH, icon_color=C.TEXT_DIM, on_click=self._on_refresh_click),
-                        ft.IconButton(icon=ft.Icons.ADD_CIRCLE_OUTLINE, icon_color=C.ACCENT, on_click=self._open_manual),
+                        ft.IconButton(icon=ft.Icons.REFRESH, icon_color=C.TEXT_DIM, tooltip="Muat ulang",
+                                      on_click=self._on_refresh_click),
+                        ft.IconButton(icon=ft.Icons.ADD_CIRCLE_OUTLINE, icon_color=C.ACCENT, tooltip="Absen manual",
+                                      on_click=self._open_manual),
                     ],
                     spacing=0,
                 ),
@@ -74,10 +81,13 @@ class AttendanceView:
         )
 
         self.notif_banner = ft.Container(visible=False)
+        self.error_banner = build_load_error_banner(
+            lambda e: self._on_refresh_click(e)
+        )
 
-        self.stat_hadir = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
-        self.stat_telat = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.LATE)
-        self.stat_minggu = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        self.stat_hadir = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        self.stat_telat = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.LATE)
+        self.stat_minggu = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
         stats_row = ft.Row(
             [
                 self._stat_box(self.stat_hadir, "Hadir Hari Ini"),
@@ -96,7 +106,8 @@ class AttendanceView:
             [
                 ft.Icon(ft.Icons.SEARCH_OUTLINED, color=C.TEXT_DIM, size=18),
                 self.search_field,
-                ft.IconButton(icon=ft.Icons.PEOPLE_OUTLINE, icon_color=C.ACCENT, on_click=self._open_name_picker),
+                ft.IconButton(icon=ft.Icons.PEOPLE_OUTLINE, icon_color=C.ACCENT, tooltip="Pilih nama",
+                              on_click=self._open_name_picker),
             ],
             spacing=8,
         )
@@ -126,6 +137,7 @@ class AttendanceView:
                 [
                     self.title_row,
                     self.notif_banner,
+                    self.error_banner,
                     ft.Container(height=8),
                     stats_row,
                     ft.Container(height=10),
@@ -202,6 +214,12 @@ class AttendanceView:
         self.list_area.update()
         self.page.run_task(self.fetch_attendance)
 
+    def _safe_update(self):
+        try:
+            self.container.update()
+        except Exception:
+            pass
+
     async def fetch_attendance(self, is_poll: bool = False):
         try:
             data = await api.fetch_attendance()
@@ -210,20 +228,23 @@ class AttendanceView:
             if is_poll and self.last_count is not None and len(sorted_data) > self.last_count:
                 newest = sorted_data[0]
                 await self._maybe_notify_new_record(newest)
-
-            self.attendance = sorted_data
-            self.last_count = len(sorted_data)
-            self.loading = False
-            self._render()
-            self.container.update()
         except Exception as ex:
+            print("Gagal ambil data absensi:", ex)
+            # self.attendance lama sengaja TIDAK ditimpa; tandai gagal supaya
+            # banner muncul dan "Belum ada data" tidak tampil menyesatkan.
+            self.load_failed = True
             self.loading = False
             self._render()
-            try:
-                self.container.update()
-            except Exception:
-                pass
-            print("Gagal ambil data absensi:", ex)
+            self._safe_update()
+            return
+
+        self.attendance = sorted_data
+        self.last_count = len(sorted_data)
+        self.load_failed = False
+        self._loaded = True
+        self.loading = False
+        self._render()
+        self._safe_update()
 
     async def _maybe_notify_new_record(self, item: dict):
         # Notif untuk absen "masuk" yang telat dikontrol oleh toggle
@@ -247,6 +268,9 @@ class AttendanceView:
             self._show_notif(f"{item['name']} baru saja absen ({jam})")
 
     def _show_notif(self, text: str, urgent: bool = False):
+        # Token versi: _hide() dari notif lama tidak boleh menyembunyikan notif baru.
+        self._notif_token += 1
+        my_token = self._notif_token
         self.notif_banner.content = ft.Row(
             [ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED if urgent else ft.Icons.NOTIFICATIONS, color=C.BG, size=16),
              ft.Text(text, color=C.BG, size=12, weight=ft.FontWeight.W_600, expand=True)],
@@ -260,6 +284,8 @@ class AttendanceView:
 
         async def _hide():
             await asyncio.sleep(4)
+            if self._notif_token != my_token:
+                return
             self.notif_banner.visible = False
             self.notif_banner.update()
 
@@ -285,7 +311,7 @@ class AttendanceView:
             if self.date_filter == "week":
                 return is_this_week(item["scanned_at"])
             if self.date_filter == "custom" and self.custom_date:
-                return item["scanned_at"].startswith(self.custom_date)
+                return item["scanned_at"][:10] == self.custom_date
             return True
 
         date_filtered = [i for i in self.attendance if date_ok(i)]
@@ -298,14 +324,22 @@ class AttendanceView:
         hadir = len([i for i in today_masuk if not is_late_record(i)])
         telat = len([i for i in today_masuk if is_late_record(i)])
         minggu = len([i for i in self.attendance if is_this_week(i["scanned_at"]) and is_masuk_record(i)])
-        self.stat_hadir.value = str(hadir)
-        self.stat_telat.value = str(telat)
-        self.stat_minggu.value = str(minggu)
+        if self._loaded:
+            self.stat_hadir.value = str(hadir)
+            self.stat_telat.value = str(telat)
+            self.stat_minggu.value = str(minggu)
+        else:
+            # Belum pernah berhasil memuat: jangan tampilkan "0" yang menyesatkan.
+            self.stat_hadir.value = self.stat_telat.value = self.stat_minggu.value = "–"
+        self.error_banner.visible = self.load_failed
 
         filtered = self._filtered()
 
         self.loading_state.visible = self.loading
-        self.empty_state.visible = (not self.loading) and len(filtered) == 0
+        self.empty_state.visible = (
+            (not self.loading) and len(filtered) == 0
+            and not (self.load_failed and not self.attendance)
+        )
         self.list_view.visible = (not self.loading) and len(filtered) > 0
 
         rows = []
@@ -333,6 +367,24 @@ class AttendanceView:
         self.list_view.controls = rows
 
     # ---------------------------------------------------------------- dialogs
+    @staticmethod
+    def _manual_error_message(ex: Exception) -> str:
+        """Ubah exception dari api.post_manual_attendance jadi pesan ramah.
+        api.py memakai raise_for_status(), jadi error server datang sebagai
+        httpx.HTTPStatusError (bukan RuntimeError); 401 datang sebagai AuthError."""
+        if isinstance(ex, (api.AuthError, RuntimeError)):
+            return str(ex)
+        if isinstance(ex, httpx.HTTPStatusError):
+            try:
+                msg = ex.response.json().get("error")
+            except Exception:
+                msg = None
+            if msg:
+                return f"Gagal mengirim absen manual: {msg}"
+            return f"Server menolak absen manual (kode {ex.response.status_code})."
+        print("Error absen manual:", ex)
+        return "Gagal mengirim absen manual. Periksa koneksi lalu coba lagi."
+
     def _open_manual(self, e):
         name_field = ft.TextField(hint_text="Nama", color=C.TEXT, bgcolor=C.SURFACE_ALT,
                                    border_color=C.BORDER, autofocus=True)
@@ -349,7 +401,7 @@ class AttendanceView:
                 self.page.pop_dialog()
                 await self.fetch_attendance()
             except Exception as ex:
-                status_text.value = f"Gagal mengirim absen manual: {ex}"
+                status_text.value = self._manual_error_message(ex)
                 status_text.update()
 
         dialog = ft.AlertDialog(
@@ -358,7 +410,7 @@ class AttendanceView:
             content=ft.Column([name_field, status_text], tight=True, spacing=8),
             actions=[
                 ft.TextButton(content=ft.Text("Batal", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog()),
-                ft.ElevatedButton(content=ft.Text("Kirim"), bgcolor=C.ACCENT, color=C.BG,
+                ft.Button(content=ft.Text("Kirim"), bgcolor=C.ACCENT, color=C.BG,
                                    on_click=lambda e: self.page.run_task(submit, e)),
             ],
         )

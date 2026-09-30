@@ -2,6 +2,14 @@
 name = "flet_app"
 version = "1.0.0"
 description = "Absensi Digital - RFID + Wajah + Sidik Jari (Flet)"
+requires-python = ">=3.10"
+# WAJIB: flet build hanya memasang paket yang tercantum di sini. Kalau
+# 'httpx' tidak ada, app terpasang tapi langsung crash saat import api.py.
+# Ganti versi flet agar SAMA dengan hasil `flet --version` di komputer build.
+dependencies = [
+  "flet==1.0.3",
+  "httpx",
+]
 
 [tool.flet]
 org = "com.espen"

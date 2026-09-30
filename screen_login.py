@@ -28,6 +28,10 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
         padding=ft.Padding.symmetric(vertical=14), alignment=ft.Alignment.CENTER,
     )
 
+    # Enter di username -> pindah fokus ke password, bukan langsung submit
+    # (kebiasaan form login pada umumnya).
+    username_field.on_submit = lambda e: password_field.focus()
+
     async def do_login(e):
         username = (username_field.value or "").strip()
         password = password_field.value or ""
@@ -37,7 +41,15 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
             status_text.update()
             return
 
-        login_label.value = "Memproses..."
+        # Tampilkan spinner kecil di dalam tombol (konsisten dengan pola
+        # loading di CardsView._submit_register), bukan cuma ganti teks.
+        login_button.content = ft.Row(
+            [
+                ft.ProgressRing(color=C.BG, width=14, height=14, stroke_width=2),
+                ft.Text("Memproses...", color=C.BG, weight=ft.FontWeight.BOLD),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER, spacing=8, tight=True,
+        )
         login_button.on_click = None
         status_text.visible = False
         login_button.update()
@@ -45,12 +57,32 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
 
         try:
             await api.login(username, password)
-            on_success()
-            return  # page sudah diganti main.py, jangan sentuh control ini lagi
-        except Exception as ex:
+        except RuntimeError as ex:
+            # Error yang sengaja dilempar api.login() dengan pesan dari
+            # server (mis. "Username atau password salah") -- aman
+            # ditampilkan langsung ke pengguna.
             status_text.value = str(ex)
-            status_text.visible = True
+        except Exception:
+            # Error lain (jaringan putus, URL salah, server tidak
+            # reachable) -- pesan asli httpx terlalu teknis untuk
+            # pengguna awam, ganti dengan pesan yang mengarahkan solusi.
+            status_text.value = "Tidak bisa terhubung ke server. Cek URL Server di bawah."
+        else:
+            # Login SUDAH berhasil di titik ini. on_success() sengaja di luar
+            # blok try di atas supaya error dari show_app() tidak salah
+            # dilaporkan sebagai "Tidak bisa terhubung ke server".
+            try:
+                on_success()
+                return  # page sudah diganti main.py, jangan sentuh control ini lagi
+            except Exception as ex:
+                print("Login berhasil, tapi gagal membuka layar utama:", ex)
+                status_text.value = (
+                    "Login berhasil, tapi layar utama gagal dibuka. "
+                    "Tutup lalu buka ulang aplikasi."
+                )
+        status_text.visible = True
 
+        login_button.content = login_label
         login_label.value = "Masuk"
         login_button.on_click = lambda e: page.run_task(do_login, e)
         try:
@@ -89,8 +121,7 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
     )
 
     def close_server_dialog(e=None):
-        server_dialog.open = False
-        page.update()
+        page.pop_dialog()
 
     async def save_server_url(e):
         new_url = (server_url_field.value or "").strip()
@@ -117,18 +148,18 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
     def open_server_dialog(e):
         server_url_field.value = api.get_base_url()
         server_dialog_status.visible = False
-        page.open(server_dialog) if hasattr(page, "open") else _open_dialog_fallback()
+        page.show_dialog(server_dialog)
 
-    def _open_dialog_fallback():
-        # Fallback untuk versi Flet yang belum punya page.open() -- daftarkan
-        # dialog ke overlay lalu buka manual.
-        if server_dialog not in page.overlay:
-            page.overlay.append(server_dialog)
-        server_dialog.open = True
-        page.update()
-
+    # Ikon kecil di sebelah teks supaya terlihat jelas ini bisa diklik,
+    # bukan sekadar label info biasa.
     server_text_button = ft.GestureDetector(
-        content=server_text,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.SETTINGS_ETHERNET_ROUNDED, size=12, color=C.TEXT_DIM),
+                server_text,
+            ],
+            spacing=4, alignment=ft.MainAxisAlignment.CENTER, tight=True,
+        ),
         on_tap=open_server_dialog,
     )
 

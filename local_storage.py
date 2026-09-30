@@ -14,6 +14,12 @@ supaya semuanya tetap ada walau app ditutup dan dibuka lagi.
 Catatan: ini penyimpanan lokal di perangkat/komputer tempat app berjalan
 (folder home user), sama seperti fungsi client_storage yang aslinya mau
 dipakai -- bukan dikirim ke server.
+
+Android/iOS: folder home & APPDATA tidak ada / tidak bisa ditulis di sana.
+Flet menyediakan folder data privat app lewat environment variable
+FLET_APP_STORAGE_DATA (persisten, tidak terhapus saat app ditutup), jadi
+variable itu dipakai lebih dulu kalau ada; kalau tidak ada (mis. dijalankan
+di komputer lewat `flet run`) pakai lokasi desktop seperti sebelumnya.
 """
 
 import json
@@ -27,14 +33,20 @@ _FILE_NAME = "local_storage.json"
 def _storage_dir() -> Path:
     """Folder tempat file storage disimpan, disesuaikan per OS supaya
     selalu ada izin tulis:
+    - Android/iOS (build Flet): $FLET_APP_STORAGE_DATA
     - Windows: %APPDATA%
     - Linux/Mac: $XDG_CONFIG_HOME atau ~/.config
     - fallback terakhir: folder home user langsung
     """
-    base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
-    if not base:
-        base = str(Path.home() / ".config")
-    path = Path(base) / _APP_DIR_NAME
+    app_data = os.environ.get("FLET_APP_STORAGE_DATA")
+    if app_data:
+        # Folder ini sudah khusus milik app & privat, tidak perlu subfolder.
+        path = Path(app_data)
+    else:
+        base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
+        if not base:
+            base = str(Path.home() / ".config")
+        path = Path(base) / _APP_DIR_NAME
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception as ex:
@@ -60,8 +72,16 @@ def _read_all() -> dict:
 
 def _write_all(data: dict) -> None:
     file = _storage_file()
+    tmp = file.with_name(file.name + ".tmp")
     try:
-        file.write_text(json.dumps(data), encoding="utf-8")
+        # Tulis ke file sementara lalu ganti sekaligus, supaya kalau app
+        # tertutup di tengah penulisan file lama tidak rusak setengah jalan.
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)  # token login: hanya pemilik yang boleh baca (Linux/Android)
+        except Exception:
+            pass
+        os.replace(tmp, file)
     except Exception as ex:
         print("Gagal menulis storage lokal:", ex)
 

@@ -166,7 +166,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             ),
             actions=[
                 ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog()),
-                ft.ElevatedButton(
+                ft.Button(
                     content=ft.Text("Simpan Password Baru"), bgcolor=C.ACCENT, color=C.BG,
                     on_click=lambda e: page.run_task(submit_change_password, e),
                 ),
@@ -301,7 +301,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             ),
             actions=[
                 ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog()),
-                ft.ElevatedButton(
+                ft.Button(
                     content=ft.Text("Simpan"), bgcolor=C.ACCENT, color=C.BG,
                     on_click=lambda e: page.run_task(save, e),
                 ),
@@ -426,11 +426,9 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             )
 
         try:
-            print(">>> SEBELUM fetch_devices")
             devices = await api.fetch_devices()
-            print(">>> SESUDAH fetch_devices, hasil:", devices)
         except Exception as ex:
-            print(">>> ERROR fetch_devices:", repr(ex))
+            print("Gagal ambil daftar perangkat:", repr(ex))
             list_col.controls = [ft.Text(f"Gagal mengambil daftar perangkat: {ex}", color=C.DANGER, size=13)]
             list_col.update()
             return
@@ -449,13 +447,15 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
         list_col.update()
 
     def open_backup_dialog(e):
-        def do_backup(e):
+        # Flet 1.0: page.launch_url() sudah dihapus, gantinya
+        # `await ft.UrlLauncher().launch_url(url)` (async).
+        async def do_backup(e):
             page.pop_dialog()
-            page.launch_url(api.backup_url())
+            await ft.UrlLauncher().launch_url(api.backup_url())
 
-        def do_export(e):
+        async def do_export(e):
             page.pop_dialog()
-            page.launch_url(api.attendance_export_url())
+            await ft.UrlLauncher().launch_url(api.attendance_export_url())
 
         dialog = ft.AlertDialog(
             title=ft.Text("Backup & Export Data Absensi", color=C.TEXT),

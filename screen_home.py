@@ -7,6 +7,7 @@ from datetime import datetime
 import flet as ft
 import theme as C
 import api
+from load_banner import build_load_error_banner
 from utils import is_today, is_this_week, is_masuk_record, is_late_record, format_date_time
 
 REFRESH_INTERVAL_S = 20
@@ -29,6 +30,11 @@ class HomeView:
         self.on_go_scan = on_go_scan  # callback(method:str|None) -> pindah tab Scan
         self._running = False
         self.attendance: list[dict] = []
+        self._loaded = False  # sudah pernah berhasil memuat data sekali?
+
+        self.error_banner = build_load_error_banner(
+            lambda e: self.page.run_task(self.fetch)
+        )
 
         # ---- header ----
         self.greeting_text = ft.Text(self._greeting(), size=13, color=C.TEXT_DIM)
@@ -48,10 +54,10 @@ class HomeView:
         )
 
         # ---- kartu ringkasan besar ----
-        self.big_hadir = ft.Text("0", size=32, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        self.big_hadir = ft.Text("–", size=32, weight=ft.FontWeight.BOLD, color=C.TEXT)
         self.big_sub = ft.Text("orang sudah absen hari ini", size=12, color=C.TEXT_DIM)
-        self.ring_telat = ft.Text("0 telat", size=12, color=C.LATE, weight=ft.FontWeight.W_600)
-        self.ring_minggu = ft.Text("0 minggu ini", size=12, color=C.TEXT_DIM, weight=ft.FontWeight.W_600)
+        self.ring_telat = ft.Text("– telat", size=12, color=C.LATE, weight=ft.FontWeight.W_600)
+        self.ring_minggu = ft.Text("– minggu ini", size=12, color=C.TEXT_DIM, weight=ft.FontWeight.W_600)
 
         summary_card = ft.Container(
             bgcolor=C.SURFACE_RAISED,
@@ -111,6 +117,7 @@ class HomeView:
         self.recent_empty = ft.Container(
             content=ft.Text("Belum ada aktivitas hari ini", color=C.TEXT_DIM, size=13),
             alignment=ft.Alignment.CENTER, padding=ft.Padding.symmetric(vertical=24),
+            visible=False,  # baru tampil setelah data berhasil dimuat & memang kosong
         )
 
         self.container = ft.Container(
@@ -120,6 +127,7 @@ class HomeView:
             content=ft.Column(
                 [
                     header,
+                    self.error_banner,
                     ft.Container(height=18),
                     summary_card,
                     ft.Container(height=18),
@@ -186,10 +194,19 @@ class HomeView:
 
     async def fetch(self):
         try:
-            self.attendance = await api.fetch_attendance()
+            data = await api.fetch_attendance()
         except Exception as ex:
             print("Gagal ambil ringkasan beranda:", ex)
+            # Data lama (kalau ada) dibiarkan apa adanya; hanya tampilkan banner.
+            self.error_banner.visible = True
+            try:
+                self.error_banner.update()
+            except Exception:
+                pass
             return
+        self.attendance = data
+        self._loaded = True
+        self.error_banner.visible = False
         self._render()
         try:
             self.container.update()

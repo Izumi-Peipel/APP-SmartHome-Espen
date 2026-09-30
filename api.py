@@ -35,7 +35,10 @@ _username: str | None = None
 _page = None  # referensi page Flet, di-set sekali lewat set_page()
 _unauthorized_handler = None  # callback async tanpa argumen, didaftarkan main.py
 
-_TIMEOUT = 10
+# Railway free tier "tidur" saat idle; request pertama (cold start) bisa
+# lebih dari 10 detik. 30 detik cukup longgar tanpa membuat app menggantung
+# terlalu lama (splash screen sudah menyiapkan pengguna untuk menunggu).
+_TIMEOUT = 30
 
 
 class AuthError(Exception):
@@ -380,11 +383,4 @@ async def update_general_settings(**kwargs) -> dict:
     data = r.json()
     if r.status_code >= 400:
         raise RuntimeError(data.get("error", "Gagal menyimpan pengaturan umum"))
-    return data
-
-async def update_card(uid: str, name: str) -> dict:
-    r = await _request("PUT", f"{cards_url()}/{uid}", json={"name": name})
-    data = r.json()
-    if r.status_code >= 400:
-        raise RuntimeError(data.get("error", "Gagal mengubah nama kartu"))
     return data
