@@ -12,6 +12,14 @@ const crypto = require('crypto'); // built-in Node -> tidak perlu npm install ta
 const mqtt = require('mqtt');
 
 const app = express();
+app.use((req, res, next) => {
+  console.log('REQ', req.method, req.originalUrl);
+  res.on('finish', () => console.log('RES', res.statusCode, req.originalUrl));
+  next();
+});
+// Railway ada di belakang reverse proxy -> wajib supaya express-rate-limit
+// membaca IP klien asli dari X-Forwarded-For (tanpa ini muncul ERR_ERL_UNEXPECTED_X_FORWARDED_FOR).
+app.set('trust proxy', 1);
 // FIX untuk deploy ke Railway/hosting cloud lain: platform seperti Railway
 // menetapkan port secara dinamis lewat env var PORT saat runtime, BUKAN
 // selalu 3000. Fallback ke 3000 tetap dipakai kalau env var PORT tidak
@@ -149,14 +157,17 @@ function verifyPassword(password, stored) {
     // "admin123" seperti sebelumnya (aman untuk testing lokal, TAPI wajib
     // diganti manual lewat menu Akun kalau server ini dibuka ke publik).
     const defaultUsername = process.env.ADMIN_INITIAL_USERNAME || 'admin';
-    const defaultPassword = process.env.ADMIN_INITIAL_PASSWORD || 'homeadmin109';
+    const fromEnv = !!process.env.ADMIN_INITIAL_PASSWORD;
+    const defaultPassword = process.env.ADMIN_INITIAL_PASSWORD
+      || crypto.randomBytes(9).toString('base64url');
     db.prepare(
       'INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)'
     ).run(defaultUsername, hashPassword(defaultPassword), nowISOJakarta());
     console.log('============================================================');
     console.log('⚠️  Akun admin default dibuat karena belum ada user:');
     console.log(`    username: ${defaultUsername}`);
-    console.log(`    password: ${defaultPassword}`);
+    // Password dari env var tidak dicetak ke log; yang acak baru dicetak.
+    if (!fromEnv) console.log(`    password: ${defaultPassword}`);
     console.log('⚠️  SEGERA login lalu ganti password lewat menu Akun di app!');
     console.log('============================================================');
   }
@@ -557,7 +568,7 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 // DEVICE_PROVISION_KEY, lalu isi field yang sama di firmware/captive
 // portal. Kalau tidak diset sama sekali, endpoint dibiarkan terbuka
 // (cukup untuk testing lokal, TIDAK disarankan untuk deploy ke publik).
-const DEVICE_PROVISION_KEY = process.env.home1209025 || null;
+const DEVICE_PROVISION_KEY = process.env.DEVICE_PROVISION_KEY || null;
 
 // Broker default yang dipakai reader yang belum di-override lewat app
 // (parse dari MQTT_BROKER_URL, mis. "mqtts://host:8883" -> host + port)
@@ -734,6 +745,28 @@ app.post('/rfid/cards', requireAuth, (req, res) => {
 });
 
 app.delete('/rfid/cards/:uid', requireAuth, (req, res) => {
+app.put('/rfid/cards/:uid', requireAuth, (req, res) => {
+  try {
+    const uid = req.params.uid.toUpperCase();
+    const { name } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Field "name" wajib diisi' });
+    }
+
+    const existing = db.prepare('SELECT * FROM cards WHERE uid = ?').get(uid);
+    if (!existing) {
+      return res.status(404).json({ error: 'Kartu tidak ditemukan' });
+    }
+
+    db.prepare('UPDATE cards SET name = ? WHERE uid = ?').run(name.trim(), uid);
+
+    console.log(`Nama kartu ${uid} diubah: ${existing.name} -> ${name.trim()}`);
+    res.json({ uid, name: name.trim(), registered_at: existing.registered_at });
+  } catch (err) {
+    console.error('PUT /rfid/cards/:uid error:', err);
+    res.status(500).json({ error: 'Gagal mengubah nama kartu' });
+  }
+});
   try {
     const uid = req.params.uid.toUpperCase();
     const result = db.prepare('DELETE FROM cards WHERE uid = ?').run(uid);
@@ -820,6 +853,25 @@ app.get('/devices', requireAuth, (req, res) => {
 // PUT /devices/:mac -> ubah reader_id / label / override broker MQTT dari app.
 // Body boleh kirim sebagian field saja. Kirim string kosong "" pada
 // mqtt_host/user/pass untuk balik pakai broker default server.
+app.put('/rfid/cards/:uid', requireAuth, (req, res) => {
+  try {
+    const uid = req.params.uid.toUpperCase();
+    const { name } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Field "name" wajib diisi' });
+    }
+    const existing = db.prepare('SELECT * FROM cards WHERE uid = ?').get(uid);
+    if (!existing) {
+      return res.status(404).json({ error: 'Kartu tidak ditemukan' });
+    }
+    db.prepare('UPDATE cards SET name = ? WHERE uid = ?').run(name.trim(), uid);
+    res.json({ uid, name: name.trim() });
+  } catch (err) {
+    console.error('PUT /rfid/cards/:uid error:', err);
+    res.status(500).json({ error: 'Gagal mengubah nama kartu' });
+  }
+});
+
 app.put('/devices/:mac', requireAuth, (req, res) => {
   try {
     const mac = req.params.mac.toUpperCase();

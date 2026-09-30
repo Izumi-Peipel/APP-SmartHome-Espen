@@ -322,6 +322,14 @@ async def delete_card(uid: str) -> None:
     if r.status_code >= 400:
         raise RuntimeError("Gagal menghapus kartu")
 
+async def update_card(uid: str, name: str) -> dict:
+    """Ganti nama pemilik kartu yang sudah terdaftar (UID tetap sama)."""
+    r = await _request("PUT", f"{cards_url()}/{uid}", json={"name": name})
+    data = r.json()
+    if r.status_code >= 400:
+        raise RuntimeError(data.get("error", "Gagal mengubah nama kartu"))
+    return data
+
 
 async def fetch_notification_settings() -> dict:
     r = await _request("GET", notification_settings_url())
@@ -372,4 +380,11 @@ async def update_general_settings(**kwargs) -> dict:
     data = r.json()
     if r.status_code >= 400:
         raise RuntimeError(data.get("error", "Gagal menyimpan pengaturan umum"))
+    return data
+
+async def update_card(uid: str, name: str) -> dict:
+    r = await _request("PUT", f"{cards_url()}/{uid}", json={"name": name})
+    data = r.json()
+    if r.status_code >= 400:
+        raise RuntimeError(data.get("error", "Gagal mengubah nama kartu"))
     return data

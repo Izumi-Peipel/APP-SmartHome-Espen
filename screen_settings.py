@@ -71,12 +71,12 @@ def _build_base_url_card(page: ft.Page) -> ft.Container:
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.LINK, color=C.ACCENT, size=20),
-                        ft.Text("URL Backend (ngrok)", color=C.TEXT, size=15, weight=ft.FontWeight.BOLD),
+                        ft.Text("URL Backend", color=C.TEXT, size=15, weight=ft.FontWeight.BOLD),
                     ],
                     spacing=8,
                 ),
                 ft.Text(
-                    "Ganti kalau URL ngrok backend berubah — tersimpan di HP ini, "
+                    "Ganti kalau alamat server berubah — tersimpan di HP ini, "
                     "tidak perlu build ulang APK.",
                     color=C.TEXT_DIM,
                     size=12,
@@ -364,14 +364,14 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             )
             buzzer_switch = ft.Switch(
                 value=bool(dev.get("buzzer_enabled", 1)), active_color=C.ACCENT, label="Buzzer aktif",
-                label_style=ft.TextStyle(color=C.TEXT_DIM, size=12),
+                label_text_style=ft.TextStyle(color=C.TEXT_DIM, size=12),
             )
             card_status = ft.Text("", size=11)
             last_seen = dev.get("last_seen_at") or "-"
 
             async def save(ev, mac=mac, reader_field=reader_field, host_field=host_field,
-                           port_field=port_field, cooldown_field=cooldown_field,
-                           buzzer_switch=buzzer_switch, card_status=card_status):
+                port_field=port_field, cooldown_field=cooldown_field,
+                buzzer_switch=buzzer_switch, card_status=card_status):
                 card_status.value = "Menyimpan..."
                 card_status.color = C.TEXT_DIM
                 card_status.update()
@@ -426,8 +426,11 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             )
 
         try:
+            print(">>> SEBELUM fetch_devices")
             devices = await api.fetch_devices()
+            print(">>> SESUDAH fetch_devices, hasil:", devices)
         except Exception as ex:
+            print(">>> ERROR fetch_devices:", repr(ex))
             list_col.controls = [ft.Text(f"Gagal mengambil daftar perangkat: {ex}", color=C.DANGER, size=13)]
             list_col.update()
             return

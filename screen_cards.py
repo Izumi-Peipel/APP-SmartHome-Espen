@@ -254,11 +254,56 @@ class CardsView:
         self.cards_empty.visible = (not self.loading_cards) and len(self.cards) == 0
         self.cards_list.visible = (not self.loading_cards) and len(self.cards) > 0
 
+        def _edit_card(self, uid: str, current_name: str):
+        name_field = ft.TextField(
+            value=current_name, label="Nama pemilik kartu",
+            color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
+        )
+        status_text = ft.Text("", size=12)
+
+        async def save(e):
+            new_name = (name_field.value or "").strip()
+            if not new_name:
+                status_text.value = "Nama tidak boleh kosong."
+                status_text.color = C.DANGER
+                status_text.update()
+                return
+            try:
+                await api.update_card(uid, new_name)
+                self.page.pop_dialog()
+                await self.fetch_cards()
+                self._show_snack(f"Nama kartu diubah jadi {new_name}")
+            except Exception as ex:
+                status_text.value = f"Gagal: {ex}"
+                status_text.color = C.DANGER
+                status_text.update()
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("Edit Nama Kartu", color=C.TEXT),
+            bgcolor=C.SURFACE,
+            content=ft.Column(
+                [
+                    ft.Text(uid, color=C.TEXT_DIM, size=12, font_family="monospace"),
+                    name_field,
+                    status_text,
+                ],
+                tight=True, spacing=10,
+            ),
+            actions=[
+                ft.TextButton(content=ft.Text("Batal", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog()),
+                ft.ElevatedButton(
+                    content=ft.Text("Simpan"), bgcolor=C.ACCENT, color=C.BG,
+                    on_click=lambda e: self.page.run_task(save, e),
+                ),
+            ],
+        )
+        self.page.show_dialog(dialog)
+
         rows = []
         for item in self.cards:
             rows.append(
                 ft.Container(
-                    content=ft.Row(
+                        content=ft.Row(
                         [
                             ft.Column(
                                 [
@@ -266,6 +311,10 @@ class CardsView:
                                     ft.Text(item["uid"], color=C.TEXT_DIM, size=12, font_family="monospace"),
                                 ],
                                 spacing=2, expand=True,
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.EDIT_OUTLINED, icon_color=C.TEXT_DIM,
+                                on_click=lambda e, u=item["uid"], n=item["name"]: self._edit_card(u, n),
                             ),
                             ft.IconButton(
                                 icon=ft.Icons.DELETE_OUTLINE, icon_color=C.DANGER,
