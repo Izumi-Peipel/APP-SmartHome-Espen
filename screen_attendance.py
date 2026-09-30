@@ -6,8 +6,8 @@ import httpx
 import flet as ft
 import theme as C
 import api
-from load_banner import build_load_error_banner
 from utils import (
+    dialog_width, DIALOG_INSET,
     format_date_time, is_today, is_this_week, is_masuk_record, is_late_record, to_date,
 )
 
@@ -60,8 +60,6 @@ class AttendanceView:
         self.last_count: int | None = None
         self._running = False
         self._notif_token = 0
-        self.load_failed = False  # True kalau fetch terakhir gagal
-        self._loaded = False      # sudah pernah berhasil memuat data sekali?
 
         # ---- controls ----
         self.title_row = ft.Row(
@@ -81,16 +79,13 @@ class AttendanceView:
         )
 
         self.notif_banner = ft.Container(visible=False)
-        self.error_banner = build_load_error_banner(
-            lambda e: self._on_refresh_click(e)
-        )
 
-        self.stat_hadir = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
-        self.stat_telat = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.LATE)
-        self.stat_minggu = ft.Text("–", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        self.stat_hadir = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        self.stat_telat = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.LATE)
+        self.stat_minggu = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT)
         stats_row = ft.Row(
             [
-                self._stat_box(self.stat_hadir, "Hadir Hari Ini"),
+                self._stat_box(self.stat_hadir, "Tepat Waktu"),
                 self._stat_box(self.stat_telat, "Telat Hari Ini"),
                 self._stat_box(self.stat_minggu, "Minggu Ini"),
             ],
@@ -137,7 +132,6 @@ class AttendanceView:
                 [
                     self.title_row,
                     self.notif_banner,
-                    self.error_banner,
                     ft.Container(height=8),
                     stats_row,
                     ft.Container(height=10),
@@ -214,12 +208,6 @@ class AttendanceView:
         self.list_area.update()
         self.page.run_task(self.fetch_attendance)
 
-    def _safe_update(self):
-        try:
-            self.container.update()
-        except Exception:
-            pass
-
     async def fetch_attendance(self, is_poll: bool = False):
         try:
             data = await api.fetch_attendance()
@@ -228,23 +216,20 @@ class AttendanceView:
             if is_poll and self.last_count is not None and len(sorted_data) > self.last_count:
                 newest = sorted_data[0]
                 await self._maybe_notify_new_record(newest)
-        except Exception as ex:
-            print("Gagal ambil data absensi:", ex)
-            # self.attendance lama sengaja TIDAK ditimpa; tandai gagal supaya
-            # banner muncul dan "Belum ada data" tidak tampil menyesatkan.
-            self.load_failed = True
+
+            self.attendance = sorted_data
+            self.last_count = len(sorted_data)
             self.loading = False
             self._render()
-            self._safe_update()
-            return
-
-        self.attendance = sorted_data
-        self.last_count = len(sorted_data)
-        self.load_failed = False
-        self._loaded = True
-        self.loading = False
-        self._render()
-        self._safe_update()
+            self.container.update()
+        except Exception as ex:
+            self.loading = False
+            self._render()
+            try:
+                self.container.update()
+            except Exception:
+                pass
+            print("Gagal ambil data absensi:", ex)
 
     async def _maybe_notify_new_record(self, item: dict):
         # Notif untuk absen "masuk" yang telat dikontrol oleh toggle
@@ -324,22 +309,14 @@ class AttendanceView:
         hadir = len([i for i in today_masuk if not is_late_record(i)])
         telat = len([i for i in today_masuk if is_late_record(i)])
         minggu = len([i for i in self.attendance if is_this_week(i["scanned_at"]) and is_masuk_record(i)])
-        if self._loaded:
-            self.stat_hadir.value = str(hadir)
-            self.stat_telat.value = str(telat)
-            self.stat_minggu.value = str(minggu)
-        else:
-            # Belum pernah berhasil memuat: jangan tampilkan "0" yang menyesatkan.
-            self.stat_hadir.value = self.stat_telat.value = self.stat_minggu.value = "–"
-        self.error_banner.visible = self.load_failed
+        self.stat_hadir.value = str(hadir)
+        self.stat_telat.value = str(telat)
+        self.stat_minggu.value = str(minggu)
 
         filtered = self._filtered()
 
         self.loading_state.visible = self.loading
-        self.empty_state.visible = (
-            (not self.loading) and len(filtered) == 0
-            and not (self.load_failed and not self.attendance)
-        )
+        self.empty_state.visible = (not self.loading) and len(filtered) == 0
         self.list_view.visible = (not self.loading) and len(filtered) > 0
 
         rows = []
@@ -431,8 +408,8 @@ class AttendanceView:
             "Tidak ada riwayat", color=C.TEXT_DIM, text_align=ft.TextAlign.CENTER
         )
         dialog = ft.AlertDialog(
-            title=ft.Text(name, color=C.TEXT), bgcolor=C.SURFACE,
-            content=ft.Container(content=content, width=340, height=300),
+            title=ft.Text(name, color=C.TEXT), bgcolor=C.SURFACE, inset_padding=DIALOG_INSET,
+            content=ft.Container(content=content, width=dialog_width(self.page, 340), height=300),
             actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog())],
         )
         self.page.show_dialog(dialog)
@@ -467,9 +444,9 @@ class AttendanceView:
 
             weekday_row = ft.Row(
                 [ft.Container(ft.Text(h, size=11, color=C.TEXT_DIM, weight=ft.FontWeight.W_600,
-                                       text_align=ft.TextAlign.CENTER), width=38, alignment=ft.Alignment.CENTER)
+                                       text_align=ft.TextAlign.CENTER), expand=True, alignment=ft.Alignment.CENTER)
                  for h in _HARI_SINGKAT],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                spacing=4,
             )
 
             today_str = _date.today().isoformat()
@@ -479,7 +456,7 @@ class AttendanceView:
                 cells = []
                 for day in week:
                     if day == 0:
-                        cells.append(ft.Container(width=38, height=38))
+                        cells.append(ft.Container(expand=True, height=38))
                         continue
                     d_str = f"{y:04d}-{m:02d}-{day:02d}"
                     is_selected = self.date_filter == "custom" and self.custom_date == d_str
@@ -504,7 +481,7 @@ class AttendanceView:
 
                     cells.append(
                         ft.Container(
-                            width=38, height=38, bgcolor=bg, border=ft.Border.all(1, border_c),
+                            expand=True, height=38, bgcolor=bg, border=ft.Border.all(1, border_c),
                             border_radius=ft.BorderRadius.all(10), alignment=ft.Alignment.CENTER,
                             on_click=pick,
                             content=ft.Stack(
@@ -515,15 +492,17 @@ class AttendanceView:
                                     ),
                                 ] + ([
                                     ft.Container(
-                                        width=4, height=4, border_radius=ft.BorderRadius.all(2),
-                                        bgcolor=C.BG if is_selected else C.SUCCESS,
-                                        bottom=4, left=17,
+                                        content=ft.Container(
+                                            width=4, height=4, border_radius=ft.BorderRadius.all(2),
+                                            bgcolor=C.BG if is_selected else C.SUCCESS,
+                                        ),
+                                        alignment=ft.Alignment.CENTER, left=0, right=0, bottom=4,
                                     )
                                 ] if has_data and not is_today else []),
                             ),
                         )
                     )
-                week_rows.append(ft.Row(cells, alignment=ft.MainAxisAlignment.SPACE_BETWEEN))
+                week_rows.append(ft.Row(cells, spacing=4))
             grid_col.controls = week_rows
 
         def change_month(delta: int):
@@ -558,9 +537,10 @@ class AttendanceView:
 
         dialog = ft.AlertDialog(
             title=ft.Text("Pilih Tanggal", color=C.TEXT), bgcolor=C.SURFACE,
+            inset_padding=DIALOG_INSET,
             content=ft.Container(
                 content=ft.Column([nav_row, ft.Container(height=6), grid_col], tight=True),
-                width=320,
+                width=dialog_width(self.page, 320),
             ),
             actions=[
                 ft.TextButton(content=ft.Text("Hari Ini", color=C.ACCENT), on_click=go_today),
@@ -588,8 +568,8 @@ class AttendanceView:
             "Belum ada data absensi", color=C.TEXT_DIM
         )
         dialog = ft.AlertDialog(
-            title=ft.Text("Pilih Nama", color=C.TEXT), bgcolor=C.SURFACE,
-            content=ft.Container(content=content, width=320, height=320),
+            title=ft.Text("Pilih Nama", color=C.TEXT), bgcolor=C.SURFACE, inset_padding=DIALOG_INSET,
+            content=ft.Container(content=content, width=dialog_width(self.page, 320), height=320),
             actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: self.page.pop_dialog())],
         )
         self.page.show_dialog(dialog)

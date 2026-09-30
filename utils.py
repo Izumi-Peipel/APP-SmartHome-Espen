@@ -3,6 +3,23 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 
+import flet as ft
+
+# Dialog di HP: inset bawaan 40dp/sisi + padding isi 24dp/sisi membuat isi dialog
+# cuma ~230dp di layar 360dp. Dialog yang memakai lebar tetap (mis. 340) jadi
+# terpotong di kanan. Pakai inset lebih kecil + lebar isi yang mengikuti layar.
+DIALOG_INSET = ft.Padding.symmetric(horizontal=16, vertical=24)
+
+
+def dialog_width(page, preferred: int = 340) -> int:
+    """Lebar isi dialog yang pasti muat di layar: layar dikurangi inset 2x16
+    dan padding isi bawaan 2x24 (=80). Tidak pernah lebih dari `preferred`."""
+    try:
+        pw = int(page.width or 360)
+    except Exception:
+        pw = 360
+    return max(200, min(preferred, pw - 80))
+
 _BULAN = [
     "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
     "Jul", "Agu", "Sep", "Okt", "Nov", "Des",

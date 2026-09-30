@@ -6,7 +6,6 @@ import asyncio
 import flet as ft
 import theme as C
 import api
-from load_banner import build_load_error_banner
 
 POLL_INTERVAL_S = 3
 
@@ -22,9 +21,7 @@ class CardsView:
         self.cards: list[dict] = []
         self.loading_cards = True
         self.submitting = False
-        self.load_failed = False  # True kalau fetch daftar kartu terakhir gagal
         self._running = False
-        self._poll_gen = 0  # penanda generasi polling; naik tiap start()/stop()
 
         self.name_input = ft.TextField(
             hint_text="Nama pemilik kartu", color=C.TEXT, bgcolor=C.SURFACE_ALT,
@@ -59,10 +56,6 @@ class CardsView:
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
-        self.error_banner = build_load_error_banner(
-            lambda e: self.page.run_task(self._on_pull_refresh, e)
-        )
-
         title_block = [] if self.embedded else [
             ft.Text("Kartu RFID", size=22, weight=ft.FontWeight.BOLD, color=C.TEXT),
             ft.Container(height=8),
@@ -76,7 +69,6 @@ class CardsView:
                 title_block + [
                     self.pending_area,
                     self.cards_header,
-                    self.error_banner,
                     ft.Container(height=4),
                     self.cards_area,
                 ],
@@ -94,12 +86,8 @@ class CardsView:
     async def fetch_cards(self):
         try:
             self.cards = await api.fetch_cards()
-            self.load_failed = False
         except Exception as ex:
             print("Gagal ambil daftar kartu:", ex)
-            # self.cards lama sengaja TIDAK ditimpa; cukup tandai gagal supaya
-            # banner muncul dan "Belum ada kartu" tidak tampil menyesatkan.
-            self.load_failed = True
         finally:
             self.loading_cards = False
             self._render_cards()
@@ -146,31 +134,15 @@ class CardsView:
             self._show_snack(f"Kartu tidak dikenal terdeteksi: {uid}")
 
     async def start(self):
-        """Mulai (atau lanjutkan) polling. Aman dipanggil berulang: kalau
-        sudah jalan, tidak melakukan apa-apa. Panggil lagi setelah stop()
-        untuk melanjutkan polling."""
         if self._running:
             return
         self._running = True
-        self._poll_gen += 1
-        gen = self._poll_gen
         await asyncio.gather(self.fetch_cards(), self.fetch_pending_card())
-        # Kalau selama fetch awal ini stop() (atau stop()+start()) dipanggil,
-        # generasi berubah -> jangan buat loop kedua.
-        if self._running and gen == self._poll_gen:
-            self.page.run_task(self._poll_loop, gen)
+        self.page.run_task(self._poll_loop)
 
-    def stop(self):
-        """Hentikan polling (mis. saat pindah ke tab lain). Loop yang sedang
-        tidur berhenti sendiri begitu bangun. Panggil start() untuk lanjut."""
-        self._running = False
-        self._poll_gen += 1
-
-    async def _poll_loop(self, gen: int):
-        while self._running and gen == self._poll_gen:
+    async def _poll_loop(self):
+        while self._running:
             await asyncio.sleep(POLL_INTERVAL_S)
-            if not self._running or gen != self._poll_gen:
-                return
             await self.fetch_pending_card()
 
     # ---------------------------------------------------------------- actions
@@ -268,9 +240,14 @@ class CardsView:
         self.page.show_dialog(dialog)
 
     def _show_snack(self, text: str):
-        # Flet 1.0: SnackBar ditampilkan lewat page.show_dialog(), bukan
-        # ditambahkan manual ke page.overlay.
-        self.page.show_dialog(ft.SnackBar(content=ft.Text(text)))
+        self.page.show_dialog  # no-op reference to keep linter happy
+        snack = ft.SnackBar(content=ft.Text(text))
+        self.page.overlay.append(snack) if hasattr(self.page, "overlay") else None
+        try:
+            snack.open = True
+        except Exception:
+            pass
+        self.page.update()
 
     # ---------------------------------------------------------------- render
     def _render_pending(self):
@@ -319,10 +296,7 @@ class CardsView:
     def _render_cards(self):
         self.cards_label.value = f"KARTU TERDAFTAR ({len(self.cards)})"
         self.cards_loading.visible = self.loading_cards
-        self.error_banner.visible = self.load_failed
-        self.cards_empty.visible = (
-            (not self.loading_cards) and len(self.cards) == 0 and not self.load_failed
-        )
+        self.cards_empty.visible = (not self.loading_cards) and len(self.cards) == 0
         self.cards_list.visible = (not self.loading_cards) and len(self.cards) > 0
 
         rows = []

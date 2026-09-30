@@ -30,7 +30,8 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
 
     # Enter di username -> pindah fokus ke password, bukan langsung submit
     # (kebiasaan form login pada umumnya).
-    username_field.on_submit = lambda e: password_field.focus()
+    # focus() di Flet 1.0 adalah coroutine -> harus dijalankan lewat run_task
+    username_field.on_submit = lambda e: page.run_task(password_field.focus)
 
     async def do_login(e):
         username = (username_field.value or "").strip()
@@ -57,6 +58,8 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
 
         try:
             await api.login(username, password)
+            on_success()
+            return  # page sudah diganti main.py, jangan sentuh control ini lagi
         except RuntimeError as ex:
             # Error yang sengaja dilempar api.login() dengan pesan dari
             # server (mis. "Username atau password salah") -- aman
@@ -67,19 +70,6 @@ def build_login_view(page: ft.Page, on_success) -> ft.Control:
             # reachable) -- pesan asli httpx terlalu teknis untuk
             # pengguna awam, ganti dengan pesan yang mengarahkan solusi.
             status_text.value = "Tidak bisa terhubung ke server. Cek URL Server di bawah."
-        else:
-            # Login SUDAH berhasil di titik ini. on_success() sengaja di luar
-            # blok try di atas supaya error dari show_app() tidak salah
-            # dilaporkan sebagai "Tidak bisa terhubung ke server".
-            try:
-                on_success()
-                return  # page sudah diganti main.py, jangan sentuh control ini lagi
-            except Exception as ex:
-                print("Login berhasil, tapi gagal membuka layar utama:", ex)
-                status_text.value = (
-                    "Login berhasil, tapi layar utama gagal dibuka. "
-                    "Tutup lalu buka ulang aplikasi."
-                )
         status_text.visible = True
 
         login_button.content = login_label

@@ -6,6 +6,7 @@ tidak perlu build ulang APK tiap kali domain ngrok berubah)."""
 import flet as ft
 import theme as C
 import api
+from utils import dialog_width, DIALOG_INSET
 
 ROWS = [
     ("notifications_outline", "Pengaturan Notifikasi"),
@@ -267,8 +268,8 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
             current = {"jam_masuk_batas": "08:00"}
 
         jam_field = ft.TextField(
-            value=current.get("jam_masuk_batas", "08:00"), label="Jam batas masuk (format 24 jam, HH:mm)",
-            hint_text="08:00", color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
+            value=current.get("jam_masuk_batas", "08:00"), label="Jam batas masuk (HH:mm)",
+            helper="Format 24 jam, mis. 08:00", hint_text="08:00", color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER,
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
         )
         status_text = ft.Text("", size=12)
@@ -320,6 +321,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
 
         dialog = ft.AlertDialog(
             title=ft.Text("Kelola Perangkat RFID", color=C.TEXT),
+            inset_padding=DIALOG_INSET,
             bgcolor=C.SURFACE,
             content=ft.Container(
                 content=ft.Column(
@@ -334,7 +336,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                     ],
                     tight=True, spacing=10, scroll=ft.ScrollMode.AUTO,
                 ),
-                width=340, height=420,
+                width=dialog_width(page, 340), height=420,
             ),
             actions=[ft.TextButton(content=ft.Text("Tutup", color=C.TEXT_DIM), on_click=lambda e: page.pop_dialog())],
         )
@@ -348,7 +350,8 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             )
             host_field = ft.TextField(
-                value=dev.get("mqtt_host") or "", label="Override broker MQTT (kosongkan = default)",
+                value=dev.get("mqtt_host") or "", label="Broker MQTT", hint_text="kosong = default",
+                expand=True,
                 color=C.TEXT, bgcolor=C.SURFACE_ALT, border_color=C.BORDER, text_size=13,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             )
@@ -400,26 +403,28 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                     [
                         ft.Row(
                             [ft.Icon(ft.Icons.NFC_ROUNDED, color=C.RFID, size=16),
-                             ft.Text(mac, color=C.TEXT_DIM, size=11, font_family="monospace", expand=True),
-                             ft.Text(f"terakhir online: {last_seen[:16] if last_seen != '-' else '-'}", color=C.TEXT_FAINT, size=10)],
+                             ft.Text(mac, color=C.TEXT_DIM, size=12, font_family="monospace", expand=True)],
                             spacing=6,
                         ),
+                        ft.Text(f"Terakhir online: {last_seen[:16].replace('T', ' ') if last_seen != '-' else '-'}",
+                                color=C.TEXT_FAINT, size=11),
                         reader_field,
                         ft.Row([host_field, port_field], spacing=8),
                         cooldown_field,
                         buzzer_switch,
+                        # Tombol penuh lebar, status di BAWAHNYA (bukan sebaris) supaya
+                        # teks status yang panjang tidak menghimpit tombol jadi vertikal.
                         ft.Row(
                             [
                                 ft.Container(
                                     content=ft.Text("Simpan", color=C.BG, size=12, weight=ft.FontWeight.BOLD),
                                     bgcolor=C.ACCENT, border_radius=ft.BorderRadius.all(8),
-                                    padding=ft.Padding.symmetric(vertical=8), alignment=ft.Alignment.CENTER,
+                                    padding=ft.Padding.symmetric(vertical=10), alignment=ft.Alignment.CENTER,
                                     expand=True, on_click=lambda ev: page.run_task(save, ev),
                                 ),
-                                card_status,
                             ],
-                            spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
+                        card_status,
                     ],
                     spacing=8,
                 ),
@@ -447,15 +452,22 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
         list_col.update()
 
     def open_backup_dialog(e):
-        # Flet 1.0: page.launch_url() sudah dihapus, gantinya
-        # `await ft.UrlLauncher().launch_url(url)` (async).
-        async def do_backup(e):
-            page.pop_dialog()
-            await ft.UrlLauncher().launch_url(api.backup_url())
+        # Flet 1.0: page.launch_url sudah tidak ada -> pakai service UrlLauncher
+        # (async), dijalankan lewat page.run_task. Dibuka di browser eksternal
+        # supaya unduhan file ditangani browser HP.
+        async def _open_url(url: str):
+            try:
+                await ft.UrlLauncher().launch_url(url, mode=ft.LaunchMode.EXTERNAL_APPLICATION)
+            except Exception as ex:
+                print("Gagal membuka URL unduhan:", ex)
 
-        async def do_export(e):
+        def do_backup(e):
             page.pop_dialog()
-            await ft.UrlLauncher().launch_url(api.attendance_export_url())
+            page.run_task(_open_url, api.backup_url())
+
+        def do_export(e):
+            page.pop_dialog()
+            page.run_task(_open_url, api.attendance_export_url())
 
         dialog = ft.AlertDialog(
             title=ft.Text("Backup & Export Data Absensi", color=C.TEXT),

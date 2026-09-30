@@ -56,7 +56,7 @@ async def main(page: ft.Page):
     # show_login()/show_app() di bawah sama-sama memanggil page.controls.clear()
     # sebelum menampilkan layar sebenarnya, jadi splash ini otomatis hilang
     # begitu salah satu dipanggil -- tidak perlu dibersihkan manual.
-    page.add(_build_splash_view())
+    page.add(ft.SafeArea(content=_build_splash_view(), expand=True))
     page.update()
 
     # ---- setup api.py: base URL & sesi login tersimpan ----
@@ -83,7 +83,7 @@ async def main(page: ft.Page):
         _stop_background_polling()
         page.navigation_bar = None
         page.controls.clear()
-        page.add(build_login_view(page, on_success=show_app))
+        page.add(ft.SafeArea(content=build_login_view(page, on_success=show_app), expand=True))
         page.update()
 
     def show_app():
@@ -96,7 +96,7 @@ async def main(page: ft.Page):
             switcher.content = views[2]
             switcher.update()
             nav_bar_ref["bar"].update()
-            scan_view.request_start()
+            page.run_task(scan_view.start)
             if method_key:
                 scan_view.open_method(method_key)
 
@@ -135,11 +135,7 @@ async def main(page: ft.Page):
             switcher.content = views[idx]
             switcher.update()
             if idx == 2:
-                scan_view.request_start()
-            else:
-                # Keluar dari tab Scan -> hentikan polling RFID (hemat baterai
-                # & kuota). start() dipanggil lagi otomatis saat kembali ke Scan.
-                scan_view.stop()
+                page.run_task(scan_view.start)
 
         nav_bar = ft.NavigationBar(
             selected_index=0,
@@ -156,7 +152,8 @@ async def main(page: ft.Page):
         nav_bar_ref["bar"] = nav_bar
         page.navigation_bar = nav_bar
 
-        page.add(content_area)
+        # SafeArea: judul tab tidak tertimpa status bar (jam/baterai) di Android
+        page.add(ft.SafeArea(content=content_area, expand=True, avoid_intrusions_bottom=False))
         page.update()
 
         # ---- mulai fetch & polling data real (beranda tiap 20s, absensi tiap 15s) ----
