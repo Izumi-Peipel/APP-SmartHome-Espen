@@ -90,6 +90,7 @@ db.exec(`
     mqtt_pass TEXT,
     scan_cooldown_ms INTEGER,
     buzzer_enabled INTEGER,
+    led_enabled INTEGER,
     created_at TEXT NOT NULL,
     last_seen_at TEXT
   )
@@ -250,6 +251,7 @@ ensureColumn('attendance', 'type', "TEXT DEFAULT 'masuk'");
 ensureColumn('attendance', 'late', 'INTEGER DEFAULT 0');
 ensureColumn('devices', 'scan_cooldown_ms', 'INTEGER');
 ensureColumn('devices', 'buzzer_enabled', 'INTEGER');
+ensureColumn('devices', 'led_enabled', 'INTEGER');
 
 // Data lama (sebelum migrasi ini) tidak punya "type", jadi default-nya
 // otomatis terisi 'masuk' oleh SQLite. Itu wajar, tidak perlu diubah manual.
@@ -832,6 +834,7 @@ app.get('/devices/:mac', (req, res) => {
       mqtt_pass: device.mqtt_pass || MQTT_PASSWORD || '',
       scan_cooldown_ms: device.scan_cooldown_ms || 3000,
       buzzer_enabled: device.buzzer_enabled === null || device.buzzer_enabled === undefined ? 1 : device.buzzer_enabled,
+      led_enabled: device.led_enabled === null || device.led_enabled === undefined ? 1 : device.led_enabled,
     });
   } catch (err) {
     console.error('GET /devices/:mac error:', err);
@@ -880,7 +883,7 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Device belum pernah online / belum terdaftar' });
     }
 
-    const { reader_id, label, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, scan_cooldown_ms, buzzer_enabled } = req.body || {};
+    const { reader_id, label, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, scan_cooldown_ms, buzzer_enabled, led_enabled } = req.body || {};
 
     const updated = {
       reader_id: reader_id !== undefined ? String(reader_id).trim() : existing.reader_id,
@@ -891,6 +894,7 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
       mqtt_pass: mqtt_pass !== undefined ? (String(mqtt_pass).trim() || null) : existing.mqtt_pass,
       scan_cooldown_ms: scan_cooldown_ms !== undefined ? (Number(scan_cooldown_ms) || null) : existing.scan_cooldown_ms,
       buzzer_enabled: buzzer_enabled !== undefined ? (buzzer_enabled ? 1 : 0) : existing.buzzer_enabled,
+      led_enabled: led_enabled !== undefined ? (led_enabled ? 1 : 0) : existing.led_enabled,
     };
 
     if (!updated.reader_id) {
@@ -898,10 +902,10 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
     }
 
     db.prepare(
-      'UPDATE devices SET reader_id = ?, label = ?, mqtt_host = ?, mqtt_port = ?, mqtt_user = ?, mqtt_pass = ?, scan_cooldown_ms = ?, buzzer_enabled = ? WHERE mac = ?'
+      'UPDATE devices SET reader_id = ?, label = ?, mqtt_host = ?, mqtt_port = ?, mqtt_user = ?, mqtt_pass = ?, scan_cooldown_ms = ?, buzzer_enabled = ?, led_enabled = ? WHERE mac = ?'
     ).run(
       updated.reader_id, updated.label, updated.mqtt_host, updated.mqtt_port,
-      updated.mqtt_user, updated.mqtt_pass, updated.scan_cooldown_ms, updated.buzzer_enabled, mac
+      updated.mqtt_user, updated.mqtt_pass, updated.scan_cooldown_ms, updated.buzzer_enabled, updated.led_enabled, mac
     );
 
     // Suruh device reload config SEKARANG (tanpa nunggu reboot manual) lewat
