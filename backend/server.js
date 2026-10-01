@@ -746,7 +746,6 @@ app.post('/rfid/cards', requireAuth, (req, res) => {
   }
 });
 
-app.delete('/rfid/cards/:uid', requireAuth, (req, res) => {
 app.put('/rfid/cards/:uid', requireAuth, (req, res) => {
   try {
     const uid = req.params.uid.toUpperCase();
@@ -769,6 +768,8 @@ app.put('/rfid/cards/:uid', requireAuth, (req, res) => {
     res.status(500).json({ error: 'Gagal mengubah nama kartu' });
   }
 });
+
+app.delete('/rfid/cards/:uid', requireAuth, (req, res) => {
   try {
     const uid = req.params.uid.toUpperCase();
     const result = db.prepare('DELETE FROM cards WHERE uid = ?').run(uid);
@@ -856,25 +857,6 @@ app.get('/devices', requireAuth, (req, res) => {
 // PUT /devices/:mac -> ubah reader_id / label / override broker MQTT dari app.
 // Body boleh kirim sebagian field saja. Kirim string kosong "" pada
 // mqtt_host/user/pass untuk balik pakai broker default server.
-app.put('/rfid/cards/:uid', requireAuth, (req, res) => {
-  try {
-    const uid = req.params.uid.toUpperCase();
-    const { name } = req.body || {};
-    if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ error: 'Field "name" wajib diisi' });
-    }
-    const existing = db.prepare('SELECT * FROM cards WHERE uid = ?').get(uid);
-    if (!existing) {
-      return res.status(404).json({ error: 'Kartu tidak ditemukan' });
-    }
-    db.prepare('UPDATE cards SET name = ? WHERE uid = ?').run(name.trim(), uid);
-    res.json({ uid, name: name.trim() });
-  } catch (err) {
-    console.error('PUT /rfid/cards/:uid error:', err);
-    res.status(500).json({ error: 'Gagal mengubah nama kartu' });
-  }
-});
-
 app.put('/devices/:mac', requireAuth, (req, res) => {
   try {
     const mac = req.params.mac.toUpperCase();
