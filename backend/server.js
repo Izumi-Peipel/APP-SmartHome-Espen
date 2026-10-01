@@ -91,6 +91,7 @@ db.exec(`
     scan_cooldown_ms INTEGER,
     buzzer_enabled INTEGER,
     led_enabled INTEGER,
+    rfid_enabled INTEGER,
     created_at TEXT NOT NULL,
     last_seen_at TEXT
   )
@@ -252,6 +253,7 @@ ensureColumn('attendance', 'late', 'INTEGER DEFAULT 0');
 ensureColumn('devices', 'scan_cooldown_ms', 'INTEGER');
 ensureColumn('devices', 'buzzer_enabled', 'INTEGER');
 ensureColumn('devices', 'led_enabled', 'INTEGER');
+ensureColumn('devices', 'rfid_enabled', 'INTEGER');
 
 // Data lama (sebelum migrasi ini) tidak punya "type", jadi default-nya
 // otomatis terisi 'masuk' oleh SQLite. Itu wajar, tidak perlu diubah manual.
@@ -612,6 +614,21 @@ function parseScanTopic(topic) {
   return { readerId: parts[1] };
 }
 
+// ---------- Event scan real-time (untuk pop-up notifikasi di app) ----------
+// Disimpan di memori (ring buffer 50 event terakhir). App memanggil
+// GET /events?after=<last_id> tiap ~2 detik untuk mengambil event baru.
+// Sengaja tidak disimpan ke database: ini hanya untuk notifikasi sesaat,
+// riwayat resmi tetap ada di tabel attendance.
+const SCAN_EVENTS_MAX = 50;
+const scanEvents = [];
+let scanEventSeq = 0;
+
+function pushScanEvent(ev) {
+  scanEventSeq += 1;
+  scanEvents.push({ id: scanEventSeq, at: nowISOJakarta(), ...ev });
+  if (scanEvents.length > SCAN_EVENTS_MAX) scanEvents.shift();
+}
+
 function publishScanResult(readerId, result) {
   if (!mqttClient || !mqttClient.connected) return;
   mqttClient.publish(`attendance/${readerId}/result`, JSON.stringify(result), { qos: 1 });
@@ -624,8 +641,20 @@ function handleScanMessage(readerId, payload) {
     return;
   }
 
+  // Reader dimatikan dari app (Kelola Perangkat RFID) -> tolak semua scan.
+  // Dicek di server juga (bukan hanya di firmware) supaya tetap efektif
+  // walau firmware di device belum diperbarui.
+  const devRow = db.prepare('SELECT rfid_enabled FROM devices WHERE reader_id = ?').get(readerId);
+  if (devRow && devRow.rfid_enabled === 0) {
+    console.log(`⛔ Scan ditolak, reader "${readerId}" sedang dinonaktifkan:`, uid);
+    pushScanEvent({ kind: 'disabled', level: 'warning', reader_id: readerId, uid, title: 'Reader nonaktif', message: `Scan di ${readerId} diabaikan` });
+    publishScanResult(readerId, { ok: false, error: 'Reader nonaktif' });
+    return;
+  }
+
   if (isScanRateLimited(readerId)) {
     console.warn(`⚠️  Rate limit terkena untuk reader "${readerId}" (MQTT)`);
+    pushScanEvent({ kind: 'rate_limited', level: 'warning', reader_id: readerId, uid, title: 'Terlalu banyak scan', message: `Reader ${readerId} dibatasi sementara` });
     publishScanResult(readerId, { ok: false, error: 'Terlalu banyak percobaan scan, coba lagi sebentar.' });
     return;
   }
@@ -635,12 +664,23 @@ function handleScanMessage(readerId, payload) {
   if (!card) {
     lastUnknownScan = { uid, scanned_at: nowISOJakarta() };
     console.log(`Kartu belum terdaftar (via "${readerId}"):`, uid);
+    pushScanEvent({ kind: 'unknown', level: 'danger', reader_id: readerId, uid, title: 'Kartu tidak dikenal', message: `UID ${uid} belum terdaftar` });
     publishScanResult(readerId, { ok: false, error: 'Kartu belum terdaftar', uid });
     return;
   }
 
   const record = recordAttendance(card.name);
   console.log(`Absen baru (RFID via "${readerId}"):`, record);
+  const isLate = !!record.late;
+  let eventTitle = record.type === 'masuk' ? 'Absen masuk' : 'Absen pulang';
+  if (record.updated) eventTitle = 'Absen pulang diperbarui';
+  pushScanEvent({
+    kind: record.type, level: isLate ? 'warning' : 'success',
+    reader_id: readerId, uid, name: record.name, late: isLate,
+    title: isLate ? `${eventTitle} (terlambat)` : eventTitle,
+    message: record.name,
+    durasi_jam: record.durasi_jam,
+  });
   publishScanResult(readerId, { ok: true, ...record });
 }
 
@@ -694,6 +734,20 @@ if (MQTT_BROKER_URL) {
   console.warn('   beserta MQTT_USERNAME / MQTT_PASSWORD kalau brokernya butuh auth.');
   console.warn('============================================================');
 }
+
+// GET /events?after=<id> -> event scan terbaru untuk pop-up real-time di app.
+// - Tanpa "after" (panggilan pertama): balas { last_id, events: [] } supaya
+//   app tidak memunculkan event lama; simpan last_id lalu polling dengan after=last_id.
+// - Kalau server restart, last_id kembali ke 0; app yang masih membawa
+//   after lebih besar dari last_id otomatis disinkronkan ulang.
+app.get('/events', requireAuth, (req, res) => {
+  const settings = getNotificationSettings();
+  const after = Number(req.query.after);
+  if (req.query.after === undefined || !Number.isFinite(after) || after > scanEventSeq) {
+    return res.json({ last_id: scanEventSeq, events: [], settings });
+  }
+  res.json({ last_id: scanEventSeq, events: scanEvents.filter((e) => e.id > after), settings });
+});
 
 app.get('/rfid/last-unknown', requireAuth, (req, res) => {
   res.json(lastUnknownScan || null);
@@ -836,6 +890,7 @@ app.get('/devices/:mac', (req, res) => {
       scan_cooldown_ms: device.scan_cooldown_ms || 3000,
       buzzer_enabled: device.buzzer_enabled === null || device.buzzer_enabled === undefined ? 1 : device.buzzer_enabled,
       led_enabled: device.led_enabled === null || device.led_enabled === undefined ? 1 : device.led_enabled,
+      rfid_enabled: device.rfid_enabled === null || device.rfid_enabled === undefined ? 1 : device.rfid_enabled,
     });
   } catch (err) {
     console.error('GET /devices/:mac error:', err);
@@ -865,7 +920,7 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Device belum pernah online / belum terdaftar' });
     }
 
-    const { reader_id, label, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, scan_cooldown_ms, buzzer_enabled, led_enabled } = req.body || {};
+    const { reader_id, label, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, scan_cooldown_ms, buzzer_enabled, led_enabled, rfid_enabled } = req.body || {};
 
     const updated = {
       reader_id: reader_id !== undefined ? String(reader_id).trim() : existing.reader_id,
@@ -877,6 +932,7 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
       scan_cooldown_ms: scan_cooldown_ms !== undefined ? (Number(scan_cooldown_ms) || null) : existing.scan_cooldown_ms,
       buzzer_enabled: buzzer_enabled !== undefined ? (buzzer_enabled ? 1 : 0) : existing.buzzer_enabled,
       led_enabled: led_enabled !== undefined ? (led_enabled ? 1 : 0) : existing.led_enabled,
+      rfid_enabled: rfid_enabled !== undefined ? (rfid_enabled ? 1 : 0) : existing.rfid_enabled,
     };
 
     if (!updated.reader_id) {
@@ -884,10 +940,10 @@ app.put('/devices/:mac', requireAuth, (req, res) => {
     }
 
     db.prepare(
-      'UPDATE devices SET reader_id = ?, label = ?, mqtt_host = ?, mqtt_port = ?, mqtt_user = ?, mqtt_pass = ?, scan_cooldown_ms = ?, buzzer_enabled = ?, led_enabled = ? WHERE mac = ?'
+      'UPDATE devices SET reader_id = ?, label = ?, mqtt_host = ?, mqtt_port = ?, mqtt_user = ?, mqtt_pass = ?, scan_cooldown_ms = ?, buzzer_enabled = ?, led_enabled = ?, rfid_enabled = ? WHERE mac = ?'
     ).run(
       updated.reader_id, updated.label, updated.mqtt_host, updated.mqtt_port,
-      updated.mqtt_user, updated.mqtt_pass, updated.scan_cooldown_ms, updated.buzzer_enabled, updated.led_enabled, mac
+      updated.mqtt_user, updated.mqtt_pass, updated.scan_cooldown_ms, updated.buzzer_enabled, updated.led_enabled, updated.rfid_enabled, mac
     );
 
     // Suruh device reload config SEKARANG (tanpa nunggu reboot manual) lewat
@@ -1104,7 +1160,13 @@ process.on('unhandledRejection', (reason) => {
 // ============================================================
 //  START SERVER
 // ============================================================
+// Penanda versi: buka /version di browser untuk memastikan Railway memang
+// menjalankan file server.js yang ini (bukan versi lama).
+const BUILD_ID = 'events-rfid-toggle-2026-10-01';
+app.get('/version', (req, res) => res.json({ build: BUILD_ID, has_events: true }));
+
 app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🏷️  BUILD: ${BUILD_ID}`);
   console.log(`✅ Server absensi jalan di:`);
   console.log(`   - http://localhost:${PORT}`);
   console.log(`   - Cek IP LAN laptopmu (ipconfig / ifconfig) untuk dipakai di app & ESP32`);
