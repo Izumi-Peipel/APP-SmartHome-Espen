@@ -26,3 +26,5 @@ dist/
 # Editor/OS
 .vscode/
 .DS_Store
+"*.jks" 
+"*.keystore" 
