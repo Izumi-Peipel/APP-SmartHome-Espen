@@ -366,7 +366,11 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             )
             buzzer_switch = ft.Switch(
-                value=bool(dev.get("buzzer_enabled", 1)), active_color=C.ACCENT, label="Buzzer aktif",
+                value=dev.get("buzzer_enabled") != 0, active_color=C.ACCENT, label="Buzzer aktif",
+                label_text_style=ft.TextStyle(color=C.TEXT_DIM, size=12),
+            )
+            led_switch = ft.Switch(
+                value=dev.get("led_enabled") != 0, active_color=C.ACCENT, label="LED merah/hijau aktif",
                 label_text_style=ft.TextStyle(color=C.TEXT_DIM, size=12),
             )
             card_status = ft.Text("", size=11)
@@ -374,7 +378,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
 
             async def save(ev, mac=mac, reader_field=reader_field, host_field=host_field,
                 port_field=port_field, cooldown_field=cooldown_field,
-                buzzer_switch=buzzer_switch, card_status=card_status):
+                buzzer_switch=buzzer_switch, led_switch=led_switch, card_status=card_status):
                 card_status.value = "Menyimpan..."
                 card_status.color = C.TEXT_DIM
                 card_status.update()
@@ -388,6 +392,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                         mqtt_port=int(port_val) if port_val else "",
                         scan_cooldown_ms=int(cooldown_val) if cooldown_val else 3000,
                         buzzer_enabled=buzzer_switch.value,
+                        led_enabled=led_switch.value,
                     )
                     card_status.value = "Tersimpan — device akan reload otomatis"
                     card_status.color = C.SUCCESS
@@ -412,6 +417,7 @@ def build_settings_view(page: ft.Page, on_logout) -> ft.Control:
                         ft.Row([host_field, port_field], spacing=8),
                         cooldown_field,
                         buzzer_switch,
+                        led_switch,
                         # Tombol penuh lebar, status di BAWAHNYA (bukan sebaris) supaya
                         # teks status yang panjang tidak menghimpit tombol jadi vertikal.
                         ft.Row(
